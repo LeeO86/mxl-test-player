@@ -1,0 +1,313 @@
+#include "anc.hpp"
+#include "audio.hpp"
+#include "config.hpp"
+#include "conform.hpp"
+#include "format.hpp"
+#include "ids.hpp"
+#include "motion.hpp"
+#include "pattern.hpp"
+#include "placeholders.hpp"
+#include "playlist.hpp"
+#include "timecode.hpp"
+#include "uuid_util.hpp"
+#include "v210.hpp"
+
+#include <doctest.h>
+
+#include <cmath>
+#include <cstdlib>
+#include <vector>
+
+using namespace mtp;
+
+TEST_CASE("format parse and interlaced grain rate") {
+    auto p = parse_format("1080p50");
+    REQUIRE(p);
+    CHECK(p->width == 1920);
+    CHECK(p->height == 1080);
+    CHECK(p->frame_rate == Rational{50, 1});
+    CHECK_FALSE(p->interlaced());
+    CHECK(p->grain_rate() == Rational{50, 1});
+
+    auto i = parse_format("1080i25");
+    REQUIRE(i);
+    CHECK(i->interlaced());
+    CHECK(i->frame_rate == Rational{25, 1});
+    CHECK(i->grain_rate() == Rational{50, 1});
+    CHECK(std::string(i->interlace_mode()) == "interlaced_tff");
+
+    auto df = parse_format("1080i29.97");
+    REQUIRE(df);
+    CHECK(df->frame_rate == Rational{30000, 1001});
+    CHECK(df->grain_rate() == Rational{60000, 1001});
+
+    CHECK_FALSE(parse_format("720i50"));
+    CHECK_FALSE(parse_format("1080i50"));
+    CHECK(parse_format("2160p50")->width == 3840);
+    CHECK(parse_format("720p59.94")->frame_rate == Rational{60000, 1001});
+}
+
+TEST_CASE("audio cadence is exact over 1000 grains") {
+    const Rational r59{60000, 1001};
+    std::uint64_t sum = 0;
+    bool saw800 = false, saw801 = false;
+    for (std::uint64_t i = 0; i < 1000; ++i) {
+        const auto n = samples_in_grain(i, r59);
+        CHECK((n == 800 || n == 801));
+        if (n == 800) saw800 = true;
+        if (n == 801) saw801 = true;
+        sum += n;
+    }
+    CHECK(saw800);
+    CHECK(saw801);
+    CHECK(sum == samples_until_grain(1000, r59));
+    CHECK(samples_in_grain(0, Rational{50, 1}) == 960);
+    CHECK(samples_until_grain(3, Rational{50, 1}) == 2880);
+
+    const Rational r29{30000, 1001};
+    bool saw1601 = false, saw1602 = false;
+    std::uint64_t sum29 = 0;
+    for (std::uint64_t i = 0; i < 1000; ++i) {
+        const auto n = samples_in_grain(i, r29);
+        CHECK((n == 1601 || n == 1602));
+        if (n == 1601) saw1601 = true;
+        if (n == 1602) saw1602 = true;
+        sum29 += n;
+    }
+    CHECK(saw1601);
+    CHECK(saw1602);
+    CHECK(sum29 == samples_until_grain(1000, r29));
+}
+
+TEST_CASE("loop conforming matches video frames times cadence") {
+    const Rational rate{50, 1};
+    const std::int64_t frames = 10;
+    const auto samples = samples_until_grain(static_cast<std::uint64_t>(frames), rate);
+    CHECK(samples == 960ull * 10);
+    std::vector<float> src(4 * 100, 0.25f);
+    std::vector<float> dst(samples * 2);
+    conform_interleaved(src.data(), 4, 100, dst.data(), 2, samples, 0);
+    CHECK(dst[0] == doctest::Approx(0.25f));
+    CHECK(dst[1] == doctest::Approx(0.25f));
+    // Padded channels dropped, missing samples are silence.
+    CHECK(dst[(100) * 2] == doctest::Approx(0.f));
+}
+
+TEST_CASE("v210 pack roundtrip and legal black") {
+    const int w = 48, h = 2;
+    std::vector<std::uint8_t> buf(v210_size(w, h));
+    fill_v210(buf.data(), w, h, kYBlack, kCMid, kCMid);
+    std::vector<std::uint16_t> y(w), cb(w / 2), cr(w / 2);
+    unpack_v210_line(buf.data(), w, y.data(), cb.data(), cr.data());
+    CHECK(y[0] == kYBlack);
+    CHECK(cb[0] == kCMid);
+    CHECK(cr[0] == kCMid);
+    CHECK(v210_line_stride(1920) == 5120);
+}
+
+TEST_CASE("pattern checksums are stable and solids hit legal levels") {
+    VideoFormat fmt = *parse_format("720p25");
+    // Use a tiny manual raster via 720 only if we render full 720. That's fine.
+    std::vector<std::uint8_t> buf(v210_size(fmt.width, fmt.height));
+    PatternRequest req;
+    req.format = fmt;
+    req.pattern = VideoPattern::Black;
+    render_pattern(req, buf.data());
+    const auto black = fnv1a64(buf.data(), buf.size());
+    render_pattern(req, buf.data());
+    CHECK(fnv1a64(buf.data(), buf.size()) == black);
+    std::vector<std::uint16_t> y(fmt.width), cb(fmt.width / 2), cr(fmt.width / 2);
+    unpack_v210_line(buf.data(), fmt.width, y.data(), cb.data(), cr.data());
+    CHECK(y[100] == kYBlack);
+
+    req.pattern = VideoPattern::White;
+    render_pattern(req, buf.data());
+    unpack_v210_line(buf.data(), fmt.width, y.data(), cb.data(), cr.data());
+    CHECK(y[100] == kYWhite);
+    CHECK(fnv1a64(buf.data(), buf.size()) != black);
+
+    req.pattern = VideoPattern::SmpteRp219;
+    render_pattern(req, buf.data());
+    const auto bars = fnv1a64(buf.data(), buf.size());
+    render_pattern(req, buf.data());
+    CHECK(fnv1a64(buf.data(), buf.size()) == bars);
+
+    req.pattern = VideoPattern::Motion;
+    req.frame_index = 0;
+    render_pattern(req, buf.data());
+    const auto m0 = fnv1a64(buf.data(), buf.size());
+    req.frame_index = 3;
+    render_pattern(req, buf.data());
+    CHECK(fnv1a64(buf.data(), buf.size()) != m0);
+}
+
+TEST_CASE("av sync flash lines up with beep sample index") {
+    const Rational rate{50, 1};
+    int flashes = 0;
+    for (std::uint64_t frame = 0; frame < 100; ++frame) {
+        if (!is_sync_frame(frame, rate)) continue;
+        ++flashes;
+        const auto sample = samples_until_grain(frame, rate);
+        CHECK(sample / 960 == frame);
+        AudioProgram prog = make_uniform_program(1, AudioSignal::Silence, 1000, -18);
+        prog.sync_beep = true;
+        std::vector<float> audio(960);
+        render_audio(prog, sample, 960, true, audio.data());
+        const double amp = goertzel_amplitude(audio.data(), 960, 1000.0, 48000.0);
+        CHECK(amp > 0.05);
+    }
+    CHECK(flashes == 2);
+}
+
+TEST_CASE("sine level and ident cadence") {
+    AudioProgram prog = make_uniform_program(1, AudioSignal::Sine, 1000, -18);
+    std::vector<float> audio(4800);
+    render_audio(prog, 0, 4800, false, audio.data());
+    const double amp = goertzel_amplitude(audio.data(), 4800, 1000.0, 48000.0);
+    CHECK(amp == doctest::Approx(dbfs_to_lin(-18)).epsilon(0.05));
+
+    AudioProgram beeps = make_ident_beep_program(3, -18);
+    std::vector<float> planar(3 * 48000);
+    render_audio(beeps, 0, 48000, false, planar.data());
+    auto bursts = [](const float* x, int n) {
+        int count = 0;
+        bool on = false;
+        for (int i = 0; i < n; ++i) {
+            const bool hot = std::fabs(x[i]) > 0.01f;
+            if (hot && !on) ++count;
+            on = hot;
+        }
+        return count;
+    };
+    CHECK(bursts(planar.data(), 48000) >= 1);
+    CHECK(bursts(planar.data() + 48000, 48000) >= 2);
+    CHECK(bursts(planar.data() + 2 * 48000, 48000) >= 3);
+}
+
+TEST_CASE("drop frame timecode and anc roundtrip") {
+    auto tc = frames_to_timecode(0, 30, true);
+    CHECK(tc.format() == "00:00:00;00");
+    // Real frame 1800 is displayed as 00:01:00;02 (frame numbers 00 and 01 are skipped).
+    auto tc2 = frames_to_timecode(1800, 30, true);
+    CHECK(tc2.ff == 2);
+    CHECK(tc2.ss == 0);
+    CHECK(tc2.mm == 1);
+    CHECK(timecode_to_frames(tc2) == 1800);
+
+    VideoFormat fmt = *parse_format("1080i29.97");
+    TimecodeQuery q;
+    q.source = TcSource::Free;
+    q.drop_frame = true;
+    q.free_start_frame = 1800;
+    q.since_start_frame = 0;
+    auto shown = timecode_for_grain(0, fmt, q);
+    CHECK(shown.drop);
+    CHECK(shown.field == 0);
+    auto shown_f2 = timecode_for_grain(1, fmt, q);
+    CHECK(shown_f2.field == 1);
+    CHECK(shown_f2.format() == shown.format());
+
+    AncPacket pkt;
+    pkt.tc = shown_f2;
+    pkt.kind = AtcKind::Vitc1;
+    pkt.interlaced = true;
+    pkt.line = 10;
+    auto grain = encode_anc_grain(pkt);
+    CHECK(grain.size() == 4096);
+    Timecode back;
+    AtcKind kind = AtcKind::Ltc;
+    REQUIRE(decode_anc_timecode(grain.data(), grain.size(), back, kind));
+    CHECK(kind == AtcKind::Vitc1);
+    CHECK(back.hh == shown_f2.hh);
+    CHECK(back.mm == shown_f2.mm);
+    CHECK(back.ss == shown_f2.ss);
+    CHECK(back.ff == shown_f2.ff);
+    CHECK(back.drop);
+    CHECK(back.field == 1);
+}
+
+TEST_CASE("moving box is a pure function of the grain index") {
+    VideoFormat fmt = *parse_format("1080p50");
+    MotionParams m;
+    m.path = MotionPath::Bounce;
+    m.speed = 0.2;
+    m.size = 0.1;
+    const auto a = moving_box_at(m, 1000, fmt);
+    const auto b = moving_box_at(m, 1000, fmt);
+    CHECK(a.x == b.x);
+    CHECK(a.y == b.y);
+    const auto c = moving_box_at(m, 1000 + 50, fmt);
+    CHECK((c.x != a.x || c.y != a.y));
+    MotionParams next = m;
+    next.speed = 0.05;
+    retarget_motion(next, m, 1000, fmt);
+    const auto kept = moving_box_at(next, 1000, fmt);
+    CHECK(std::abs(kept.x - a.x) <= 1);
+    CHECK(std::abs(kept.y - a.y) <= 1);
+
+    const double durs[] = {0.1, 0.1, 0.2};
+    double total = 0;
+    CHECK(sprite_frame_at_time(0.05, durs, 3, total) == 0);
+    CHECK(sprite_frame_at_time(0.15, durs, 3, total) == 1);
+    CHECK(sprite_frame_at_time(0.25, durs, 3, total) == 2);
+    CHECK(total == doctest::Approx(0.4));
+    // Same timestamp selects the same sprite frame on 50p and 59.94.
+    const double t = 1.25;
+    const auto f50 = sprite_frame_at_time(std::fmod(t, total), durs, 3, total);
+    const auto f60 = sprite_frame_at_time(std::fmod(t, total), durs, 3, total);
+    CHECK(f50 == f60);
+}
+
+TEST_CASE("playlist sequencing and placeholders") {
+    std::vector<PlaylistEntry> e{{"a", 10, 2}, {"b", 5, 1}, {"c", 4, 0}};
+    auto at0 = locate_playlist(e, 0);
+    CHECK(at0.entry == 0);
+    CHECK(at0.frame_in_item == 0);
+    auto at15 = locate_playlist(e, 15);
+    CHECK(at15.entry == 0);
+    CHECK(at15.loop_index == 1);
+    CHECK(at15.frame_in_item == 5);
+    auto at20 = locate_playlist(e, 20);
+    CHECK(at20.entry == 1);
+    CHECK(at20.frame_in_item == 0);
+    auto at25 = locate_playlist(e, 25);
+    CHECK(at25.entry == 2);
+    CHECK(at25.frame_in_item == 0);
+    auto later = locate_playlist(e, 25 + 4 * 3 + 1);
+    CHECK(later.entry == 2);
+    CHECK(later.loop_index == 3);
+    CHECK_FALSE(later.ended);
+
+    PlaceholderVars v;
+    v.label = "Out 1";
+    v.timecode = "01:02:03:04";
+    v.frame = "9";
+    auto s = expand_placeholders("[{label}] {timecode} f{frame} {nope}", v);
+    CHECK(s == "[Out 1] 01:02:03:04 f9 {nope}");
+}
+
+TEST_CASE("config env overrides file and ids are stable") {
+    const char* env[] = {"PLAYER_FORMAT=720p50", "PLAYER_OUTPUTS=1", "PLAYER_AUDIO_CHANNELS=8", "PLAYER_LIBRARY_DIR=/tmp/lib-test",
+                         "WEB_PORT=9", "NMOS_SEED=unit-player", "MXL_OUTPUT_DOMAIN_DIR=/tmp/mxl-unit", nullptr};
+    // No file.
+    auto cfg = load_config("/tmp/does-not-exist-player.json", env);
+    CHECK(cfg.format.name == "720p50");
+    CHECK(cfg.outputs == 1);
+    CHECK(cfg.audio_channels == 8);
+    CHECK(cfg.web_port == 9);
+    CHECK(cfg.mxl_domain_dir == "/tmp/mxl-unit");
+    CHECK(cfg.output_configs.size() == 1);
+
+    const char* bad[] = {"PLAYER_OUTPUTS=99", "NMOS_SEED=x", nullptr};
+    CHECK_THROWS_AS(load_config("/tmp/does-not-exist-player.json", bad), Error);
+
+    auto node = node_id_from_seed("unit-player");
+    auto a = derive_output_ids(node, 0, *parse_format("1080p50"), 16, false);
+    auto b = derive_output_ids(node, 0, *parse_format("1080p50"), 16, false);
+    auto c = derive_output_ids(node, 0, *parse_format("1080p25"), 16, false);
+    CHECK(a.video_flow == b.video_flow);
+    CHECK(a.video_flow != c.video_flow);
+    CHECK(a.video_flow.str().size() == 36);
+    // Source id does not include the format, so a source swap would not retarget it.
+    CHECK(a.video_source == c.video_source);
+}

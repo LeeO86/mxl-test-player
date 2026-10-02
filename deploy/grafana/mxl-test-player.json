@@ -1,0 +1,38 @@
+{
+  "title": "MXL Test Player",
+  "uid": "mxl-test-player",
+  "schemaVersion": 39,
+  "timezone": "utc",
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Grains written",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "targets": [{"expr": "sum by (output) (rate(mxl_test_player_grains_written_total[1m]))", "legendFormat": "output {{output}}"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Underruns",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "targets": [{"expr": "sum by (output) (rate(mxl_test_player_underruns_total[1m]))", "legendFormat": "output {{output}}"}]
+    },
+    {
+      "type": "stat",
+      "title": "Library items",
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 8},
+      "targets": [{"expr": "mxl_test_player_library_items"}]
+    },
+    {
+      "type": "stat",
+      "title": "Library bytes",
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 8},
+      "targets": [{"expr": "mxl_test_player_library_bytes"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Conversion jobs",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "targets": [{"expr": "mxl_test_player_conversion_jobs", "legendFormat": "{{state}}"}]
+    }
+  ]
+}
