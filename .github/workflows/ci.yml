@@ -1,0 +1,27 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build pkg-config g++ \
+            libfreetype6-dev libavcodec-dev libavformat-dev libavutil-dev \
+            libswscale-dev libswresample-dev nlohmann-json3-dev uuid-dev ffmpeg
+      - name: web
+        run: cd web && npm install && npm run build
+      - name: cmake
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+      - name: build
+        run: cmake --build build -j
+      - name: unit
+        run: ./build/player_tests
+      - name: integration
+        run: python3 tests/integration/play_loop.py

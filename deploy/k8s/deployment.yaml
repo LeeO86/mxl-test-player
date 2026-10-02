@@ -1,0 +1,107 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mxl-test-player
+  labels:
+    app: mxl-test-player
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mxl-test-player
+  template:
+    metadata:
+      labels:
+        app: mxl-test-player
+        io.dmf.mxl.revision: "0.3.0"
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: player
+          image: ghcr.io/leeo86/mxl-test-player:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: web
+              containerPort: 8130
+            - name: nmos
+              containerPort: 3282
+          env:
+            - name: PLAYER_FORMAT
+              value: "1080p50"
+            - name: PLAYER_OUTPUTS
+              value: "2"
+            - name: PLAYER_AUDIO_CHANNELS
+              value: "16"
+            - name: PLAYER_LIBRARY_DIR
+              value: /data/library
+            - name: MXL_OUTPUT_DOMAIN_DIR
+              value: /Volumes/mxl/player
+            - name: NMOS_DNS_SD
+              value: "false"
+            - name: WEB_PORT
+              value: "8130"
+            - name: NMOS_PORT
+              value: "3282"
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: web
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: web
+          resources:
+            # Starting point for 2x 1080p50. Raise for 2160p or more outputs.
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "8"
+              memory: 16Gi
+          volumeMounts:
+            - name: mxl
+              mountPath: /Volumes/mxl
+            - name: library
+              mountPath: /data/library
+            - name: config
+              mountPath: /config
+      volumes:
+        - name: mxl
+          hostPath:
+            path: /Volumes/mxl
+            type: DirectoryOrCreate
+        - name: library
+          persistentVolumeClaim:
+            claimName: mxl-test-player-library
+        - name: config
+          emptyDir: {}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mxl-test-player-library
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      # Size for mezzanine media. ProRes 422 HQ 1080p50 is on the order of
+      # 100 GB/hour; size the claim for the library you intend to keep.
+      storage: 200Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mxl-test-player
+spec:
+  selector:
+    app: mxl-test-player
+  ports:
+    - name: web
+      port: 8130
+      targetPort: web
+    - name: nmos
+      port: 3282
+      targetPort: nmos

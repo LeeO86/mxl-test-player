@@ -1,0 +1,17 @@
+{
+  "format": "1080p50",
+  "outputs_count": 2,
+  "audio_channels": 16,
+  "library_dir": "/data/library",
+  "convert_concurrency": 1,
+  "ram_clip_max_s": 20,
+  "ram_budget_mb": 4096,
+  "preroll_frames": 25,
+  "web_port": 8130,
+  "nmos_port": 3282,
+  "nmos_dns_sd": false,
+  "outputs": [
+    {"label": "Out 1"},
+    {"label": "Out 2", "audio_channels": 8}
+  ]
+}
