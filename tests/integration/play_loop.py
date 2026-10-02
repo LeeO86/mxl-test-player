@@ -143,13 +143,15 @@ def main():
         burn = st2["burnin"]
         burn["texts"] = [{"text": "LIVE {frame}", "anchor": "mc", "size": 6, "font": "DejaVu Sans", "color": "#FFFFFF", "opacity": 1, "box": True, "box_color": "#000000", "box_opacity": 0.5, "box_padding": 0.3, "outline": False, "shadow": False, "offset_x": 0, "offset_y": 0}]
         burn["boxes"] = [{"enabled": True, "content": "builtin", "path": "bounce", "speed": 0.2, "size": 0.15, "opacity": 1, "color": "#FFCC00", "include_in_key": False, "start_x": 0, "start_y": 0}]
-        g0 = http("GET", "/api/v1/outputs/0")["grains"]
+        before = http("GET", "/api/v1/outputs/0")
+        g0 = before["grains"]
+        u0 = before["underruns"]
         http("PUT", "/api/v1/outputs/0/burnin", burn)
         time.sleep(0.4)
         st3 = http("GET", "/api/v1/outputs/0")
         assert st3["video_flow_id"] == flow
         assert st3["grains"] >= g0 + 8, (g0, st3["grains"])
-        assert st3["underruns"] == 0
+        assert st3["underruns"] == u0 == 0, (u0, st3["underruns"])
 
         http("PATCH", "/api/v1/outputs/0", {"format": "1080p25"})
         time.sleep(0.4)

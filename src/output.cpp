@@ -112,11 +112,13 @@ Output::~Output() { join(); }
 
 void Output::start() {
     stop_ = false;
+    loader_ = std::thread([this] { loader_main(); });
     thread_ = std::thread([this] { writer_main(); });
 }
 
 void Output::join() {
     stop_ = true;
+    if (loader_.joinable()) loader_.join();
     if (thread_.joinable()) thread_.join();
 }
 
@@ -141,64 +143,97 @@ AudioProgram Output::program_for(const SourceDesc& src, int channels) const {
     return p;
 }
 
-void Output::load_media(const SourceDesc& src, const VideoFormat& fmt) {
-    media_ = {};
-    ram_bytes_ = 0;
-    if (src.type != "video" && src.type != "still") return;
-    if (src.item_id.empty() || !library_.exists(src.item_id)) return;
+Output::Media Output::load_media(const SourceDesc& src, const VideoFormat& fmt) const {
+    Media media;
+    if (src.type != "video" && src.type != "still") return media;
+    if (src.item_id.empty() || !library_.exists(src.item_id)) return media;
     LibraryItem item;
     try {
         item = library_.get(src.item_id);
     } catch (...) {
-        return;
+        return media;
     }
-    media_.name = item.name;
-    media_.item_id = item.id;
-    media_.format = fmt.name;
+    media.name = item.name;
+    media.item_id = item.id;
+    media.format = fmt.name;
     const auto dir = fs::path(library_.item_dir(item.id));
     if (item.type == ItemType::Still) {
         const auto conv = item.conversions.value(fmt.name, nlohmann::json::object());
         if (conv.value("status", "") != "ready") {
             library_.ensure_format(item.id, fmt);
-            return;
+            return media;
         }
         std::ifstream in(dir / ("frame-" + fmt.name + ".v210"), std::ios::binary);
-        media_.still_fill.assign(std::istreambuf_iterator<char>(in), {});
+        media.still_fill.assign(std::istreambuf_iterator<char>(in), {});
         std::ifstream kin(dir / ("key-" + fmt.name + ".v210"), std::ios::binary);
-        media_.still_key.assign(std::istreambuf_iterator<char>(kin), {});
+        media.still_key.assign(std::istreambuf_iterator<char>(kin), {});
         std::ifstream ain(dir / ("alpha-" + fmt.name + ".a10"), std::ios::binary);
-        media_.still_a10.assign(std::istreambuf_iterator<char>(ain), {});
-        media_.still = true;
-        media_.ready = !media_.still_fill.empty();
-        media_.frames = 1;
-        return;
+        media.still_a10.assign(std::istreambuf_iterator<char>(ain), {});
+        media.still = true;
+        media.ready = !media.still_fill.empty();
+        media.frames = 1;
+        return media;
     }
-    if (item.type != ItemType::Video) return;
+    if (item.type != ItemType::Video) return media;
     const auto conv = item.conversions.value(fmt.name, nlohmann::json::object());
     if (conv.value("status", "") != "ready") {
         library_.ensure_format(item.id, fmt);
-        return;
+        return media;
     }
-    media_.frames = conv.value("frames", 1);
-    media_.channels = conv.value("audio_channels", cfg_.audio_channels);
-    if (item.original.contains("timecode")) media_.tc_start = item.original.value("timecode", "00:00:00:00");
-    const double seconds = fmt.frame_rate.to_double() > 0 ? static_cast<double>(media_.frames) / fmt.frame_rate.to_double() : 0;
+    media.frames = conv.value("frames", 1);
+    media.channels = conv.value("audio_channels", 0);
+    if (media.channels <= 0) {
+        std::lock_guard lock(mu_);
+        media.channels = cfg_.audio_channels;
+    }
+    if (item.original.contains("timecode")) media.tc_start = item.original.value("timecode", "00:00:00:00");
+    const double seconds = fmt.frame_rate.to_double() > 0 ? static_cast<double>(media.frames) / fmt.frame_rate.to_double() : 0;
     const auto mezz = dir / conv.value("mezz", "mezz-" + fmt.name + ".mov");
-    const std::uint64_t bytes = static_cast<std::uint64_t>(media_.frames) * v210_size(fmt.width, fmt.height);
+    const std::uint64_t bytes = static_cast<std::uint64_t>(media.frames) * v210_size(fmt.width, fmt.height);
     if (seconds <= ram_max_s_ && bytes <= ram_budget_) {
         std::string err;
-        if (load_mezzanine(mezz.string(), media_.clip, err)) {
-            media_.ram = true;
-            media_.ready = true;
-            media_.frames = media_.clip.frames;
-            media_.channels = media_.clip.channels;
-            ram_bytes_ = media_.clip.v210.size() + media_.clip.audio.size() * sizeof(float);
-            return;
+        if (load_mezzanine(mezz.string(), media.clip, err)) {
+            media.ram = true;
+            media.ready = true;
+            media.frames = media.clip.frames;
+            media.channels = media.clip.channels;
+            return media;
         }
         log_warn("ram load failed: " + err);
     }
-    media_.ready = fs::exists(mezz);
-    media_.ram = false;
+    media.ready = fs::exists(mezz);
+    media.ram = false;
+    return media;
+}
+
+void Output::loader_main() {
+    int seen = -1;
+    while (!stop_) {
+        SourceDesc src;
+        VideoFormat fmt;
+        int ticket = 0;
+        {
+            std::lock_guard lock(mu_);
+            src = load_override_ ? load_src_ : source_;
+            fmt = fmt_;
+            ticket = media_gen_;
+        }
+        if (ticket == seen) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            continue;
+        }
+        Media loaded = load_media(src, fmt);
+        {
+            std::lock_guard lock(mu_);
+            if (media_gen_ == ticket) {
+                published_ = std::make_shared<const Media>(std::move(loaded));
+                const auto pub = published_.load();
+                ram_bytes_ = 0;
+                if (pub && pub->ram) ram_bytes_ = pub->clip.v210.size() + pub->clip.audio.size() * sizeof(float);
+                seen = ticket;
+            }
+        }
+    }
 }
 
 void Output::reopen(const OutputConfig& cfg, const VideoFormat& fmt) {
@@ -253,19 +288,18 @@ void Output::writer_main() {
         }
         if (gen != applied_gen_) {
             reopen(cfg, fmt);
-            load_media(src, fmt);
             applied_gen_ = gen;
             have_last = false;
             {
                 std::lock_guard lock(mu_);
                 origin_valid_ = false;
+                media_gen_++;
             }
             reader.close();
             reader_path.clear();
         }
-        if (media_.item_id != src.item_id || (src.type == "pattern" && media_.ready)) {
-            if (src.type != "pattern") load_media(src, fmt);
-        }
+        auto media = published_.load();
+        if (!media) media = std::make_shared<const Media>();
         const Rational gr = fmt.grain_rate();
         mxlRational rr{gr.num, gr.den};
         const std::uint64_t now = mxlGetCurrentIndex(&rr);
@@ -294,7 +328,7 @@ void Output::writer_main() {
             else if (transport == "stop") media_frame = 0;
             else media_frame = origin_media_ + std::max<std::int64_t>(0, delta);
         }
-        const std::int64_t dur = (src.type == "video" && media_.frames > 0) ? media_.frames : 0;
+        const std::int64_t dur = (src.type == "video" && media->frames > 0) ? media->frames : 0;
         if (dur > 0 && transport == "play") {
             if (loop) {
                 loop_index = media_frame / dur;
@@ -309,19 +343,23 @@ void Output::writer_main() {
             loop_index = loc.loop_index;
             media_frame = loc.frame_in_item;
             const auto& entry = src.entries[static_cast<std::size_t>(loc.entry)];
-            if (media_.item_id != entry.item_id) {
-                try {
-                    const auto item = library_.get(entry.item_id);
-                    src.type = item.type == ItemType::Still ? "still" : "video";
-                } catch (...) {
-                    src.type = "video";
+            if (media->item_id != entry.item_id) {
+                std::lock_guard lock(mu_);
+                if (load_src_.item_id != entry.item_id) {
+                    load_src_ = src;
+                    load_src_.item_id = entry.item_id;
+                    load_src_.type = "video";
+                    try {
+                        const auto item = library_.get(entry.item_id);
+                        if (item.type == ItemType::Still) load_src_.type = "still";
+                    } catch (...) {
+                    }
+                    load_override_ = true;
+                    media_gen_++;
                 }
-                src.item_id = entry.item_id;
-                load_media(src, fmt);
-            } else {
-                src.type = media_.still ? "still" : "video";
-                src.item_id = entry.item_id;
             }
+            src.type = media->still ? "still" : (media->ready ? "video" : src.type);
+            src.item_id = entry.item_id;
         }
         if (loop_index != last_loop_index) {
             if (loop_index > last_loop_index) loops_ += static_cast<std::uint64_t>(loop_index - last_loop_index);
@@ -336,7 +374,7 @@ void Output::writer_main() {
         fill_v210(key.data(), fmt.width, fmt.height, key_y, kCMid, kCMid);
         bool keyed_still = false;
         std::string item_name;
-        if (idle || src.type == "pattern" || !media_.ready) {
+        if (idle || src.type == "pattern" || !media->ready) {
             if (!idle && src.type == "pattern") {
                 PatternRequest req;
                 req.format = fmt;
@@ -348,19 +386,20 @@ void Output::writer_main() {
                 render_pattern(req, full.data());
             } else {
                 fill_v210(full.data(), fmt.width, fmt.height, kYBlack, kCMid, kCMid);
-                if (!idle && (src.type == "video" || src.type == "still") && !media_.ready) underruns_++;
+                // Not ready yet means the loader is still decoding. Keep black on time;
+                // that wait is not an underrun.
             }
-        } else if (media_.still) {
+        } else if (media->still) {
             keyed_still = true;
-            if (media_.still_fill.size() == full.size()) std::memcpy(full.data(), media_.still_fill.data(), full.size());
-            if (media_.still_key.size() == key.size()) std::memcpy(key.data(), media_.still_key.data(), key.size());
-            if (media_.still_a10.size() == a10.size()) std::memcpy(a10.data(), media_.still_a10.data(), a10.size());
-            item_name = media_.name;
-        } else if (media_.ram && media_.clip.frames > 0) {
-            const std::int64_t f = std::clamp<std::int64_t>(media_frame, 0, media_.clip.frames - 1);
+            if (media->still_fill.size() == full.size()) std::memcpy(full.data(), media->still_fill.data(), full.size());
+            if (media->still_key.size() == key.size()) std::memcpy(key.data(), media->still_key.data(), key.size());
+            if (media->still_a10.size() == a10.size()) std::memcpy(a10.data(), media->still_a10.data(), a10.size());
+            item_name = media->name;
+        } else if (media->ram && media->clip.frames > 0) {
+            const std::int64_t f = std::clamp<std::int64_t>(media_frame, 0, media->clip.frames - 1);
             const std::size_t off = static_cast<std::size_t>(f) * full.size();
-            if (off + full.size() <= media_.clip.v210.size()) std::memcpy(full.data(), media_.clip.v210.data() + off, full.size());
-            item_name = media_.name;
+            if (off + full.size() <= media->clip.v210.size()) std::memcpy(full.data(), media->clip.v210.data() + off, full.size());
+            item_name = media->name;
         } else {
             fill_v210(full.data(), fmt.width, fmt.height, kYBlack, kCMid, kCMid);
         }
@@ -381,7 +420,7 @@ void Output::writer_main() {
         tq.free_start_frame = cfg.free_start_frame;
         tq.since_start_frame = std::max<std::int64_t>(0, media_frame);
         tq.media_frame = std::max<std::int64_t>(0, media_frame);
-        tq.media_start_frame = parse_tc_frames(media_.tc_start, timecode_fps(fmt.frame_rate));
+        tq.media_start_frame = parse_tc_frames(media->tc_start, timecode_fps(fmt.frame_rate));
         std::tm tm{};
         const std::time_t wall = std::time(nullptr);
         localtime_r(&wall, &tm);
@@ -479,17 +518,17 @@ void Output::writer_main() {
         if (!silence && (src.type == "pattern" || transport == "pause")) {
             const bool flash = (src.sync_beep || src.pattern == "av_sync") && is_sync_frame(abs_frame, fmt.frame_rate) && field <= 0;
             render_audio(program_for(src, channels), sample_index, static_cast<int>(count), flash, planar.data());
-        } else if (!silence && media_.ram && media_.clip.channels > 0 && media_.clip.audio_samples > 0) {
+        } else if (!silence && media->ram && media->clip.channels > 0 && media->clip.audio_samples > 0) {
             const Rational fr = fmt.frame_rate;
             const std::uint64_t base = samples_until_grain(static_cast<std::uint64_t>(std::max<std::int64_t>(0, media_frame)), fr);
             std::uint64_t offset = base;
             if (field == 1) offset += samples_in_grain(abs_frame * 2, gr);
-            const int sch = media_.clip.channels;
+            const int sch = media->clip.channels;
             for (std::uint32_t i = 0; i < count; ++i) {
-                const std::uint64_t s = (offset + i) % media_.clip.audio_samples;
+                const std::uint64_t s = (offset + i) % media->clip.audio_samples;
                 for (int c = 0; c < channels; ++c) {
                     float v = 0;
-                    if (c < sch) v = media_.clip.audio[s * static_cast<std::uint64_t>(sch) + c];
+                    if (c < sch) v = media->clip.audio[s * static_cast<std::uint64_t>(sch) + c];
                     planar[static_cast<std::size_t>(c) * count + i] = v;
                 }
             }
@@ -549,13 +588,15 @@ void Output::writer_main() {
 
 nlohmann::json Output::status() const {
     std::lock_guard lock(mu_);
+    auto media = published_.load();
+    if (!media) media = std::make_shared<const Media>();
     const double fps = fmt_.frame_rate.to_double();
     double progress = 0;
     double remain = 0;
-    if (media_.frames > 1 && fps > 0) {
+    if (media->frames > 1 && fps > 0) {
         const std::int64_t frame = transport_ == "pause" ? hold_frame_ : 0;
-        progress = media_.frames ? static_cast<double>(frame % media_.frames) / media_.frames : 0;
-        remain = media_.frames / fps;
+        progress = media->frames ? static_cast<double>(frame % media->frames) / media->frames : 0;
+        remain = media->frames / fps;
         (void)frame;
     }
     return nlohmann::json{{"index", index_},
@@ -586,8 +627,8 @@ nlohmann::json Output::status() const {
                           {"ram_bytes", ram_bytes_.load()},
                           {"progress", progress},
                           {"remaining_s", remain},
-                          {"media_ready", media_.ready},
-                          {"item", media_.name}};
+                          {"media_ready", media->ready},
+                          {"item", media->name}};
 }
 
 nlohmann::json Output::ids_json() const { return status(); }
@@ -630,8 +671,9 @@ void Output::set_source(const SourceDesc& src) {
         origin_valid_ = false;
         origin_media_ = 0;
         hold_frame_ = 0;
-        // Reload media without minting new flow ids.
-        config_gen_++;
+        load_override_ = false;
+        // Reload the picture without recreating MXL flows.
+        media_gen_++;
         cb = on_change;
     }
     if (cb) cb();

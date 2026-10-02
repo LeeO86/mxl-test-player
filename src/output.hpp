@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -60,10 +61,27 @@ public:
     std::function<void()> on_change;
 
 private:
+    struct Media {
+        bool ready = false;
+        bool ram = false;
+        bool still = false;
+        std::string item_id;
+        std::string format;
+        RamClip clip;
+        std::vector<std::uint8_t> still_fill;
+        std::vector<std::uint8_t> still_key;
+        std::vector<std::uint8_t> still_a10;
+        std::int64_t frames = 1;
+        int channels = 0;
+        std::string name;
+        std::string tc_start = "00:00:00:00";
+    };
+
     void writer_main();
+    void loader_main();
     void reopen(const OutputConfig& cfg, const VideoFormat& fmt);
     AudioProgram program_for(const SourceDesc& src, int channels) const;
-    void load_media(const SourceDesc& src, const VideoFormat& fmt);
+    Media load_media(const SourceDesc& src, const VideoFormat& fmt) const;
 
     int index_;
     MxlSession& mxl_;
@@ -88,6 +106,10 @@ private:
     bool origin_valid_ = false;
     int config_gen_ = 0;
     int applied_gen_ = -1;
+    int media_gen_ = 0;
+    SourceDesc load_src_;
+    bool load_override_ = false;
+    std::atomic<std::shared_ptr<const Media>> published_;
 
     std::atomic<bool> stop_{false};
     std::atomic<bool> master_v_{true};
@@ -100,26 +122,11 @@ private:
     std::atomic<int> ahead_{0};
     std::atomic<std::uint64_t> ram_bytes_{0};
     std::thread thread_;
+    std::thread loader_;
 
     MxlFlow video_, audio_, data_, key_;
     bool flows_open_ = false;
 
-    struct Media {
-        bool ready = false;
-        bool ram = false;
-        bool still = false;
-        std::string item_id;
-        std::string format;
-        RamClip clip;
-        std::vector<std::uint8_t> still_fill;
-        std::vector<std::uint8_t> still_key;
-        std::vector<std::uint8_t> still_a10;
-        std::int64_t frames = 1;
-        int channels = 0;
-        std::string name;
-        std::string tc_start = "00:00:00:00";
-    };
-    Media media_;
     struct Sprite {
         std::string id;
         int w = 0, h = 0;
