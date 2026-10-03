@@ -5,6 +5,7 @@
 #include "format.hpp"
 #include "ids.hpp"
 #include "motion.hpp"
+#include "nmos.hpp"
 #include "mxl_io.hpp"
 #include "pattern.hpp"
 #include "placeholders.hpp"
@@ -400,4 +401,53 @@ TEST_CASE("stop_children does not wait out a long job") {
     worker.join();
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
     CHECK(ms < 5000);
+}
+
+TEST_CASE("NMOS resources carry the fields IS-04 v1.3 requires") {
+    const auto node = node_id_from_seed("nmos-unit");
+    const auto ids = derive_output_ids(node, 0, *parse_format("1080p50"), 16, false);
+    const auto fmt = *parse_format("1080p50");
+    NmosModel m;
+    m.node_id = node.str();
+    m.device_id = ids.device.str();
+    m.host = "10.1.2.3";
+    auto sender = [&](const Uuid& id, const Uuid& source, const char* format, const std::string& def) {
+        NmosSenderState s;
+        s.id = id.str();
+        s.source_id = source.str();
+        s.label = s.description = "Out 1";
+        s.format = format;
+        s.flow = nlohmann::json::parse(def);
+        s.flow_id = s.flow.at("id").get<std::string>();
+        return s;
+    };
+    const auto video = sender(ids.video_sender, ids.video_source, "urn:x-nmos:format:video",
+                              video_flow_json(ids.video_flow, "Out 1", "Out 1", "Video", fmt, false, ids.video_source, ids.device));
+    const auto audio = sender(ids.audio_sender, ids.audio_source, "urn:x-nmos:format:audio",
+                              audio_flow_json(ids.audio_flow, "Out 1 audio", "Out 1", 16, ids.audio_source, ids.device));
+    const std::string v = "1:0";
+    // resource_core.json
+    auto core = [](const nlohmann::json& j) {
+        for (const char* k : {"id", "version", "label", "description", "tags"}) CHECK_MESSAGE(j.contains(k), k);
+    };
+    const auto n = nmos_node_json(m, v);
+    core(n);
+    for (const char* k : {"href", "api", "caps", "services", "clocks", "interfaces"}) CHECK_MESSAGE(n.contains(k), k);
+    const auto d = nmos_device_json(m, v);
+    core(d);
+    for (const char* k : {"type", "node_id", "senders", "receivers", "controls"}) CHECK_MESSAGE(d.contains(k), k);
+    for (const auto* s : {&video, &audio}) {
+        const auto src = nmos_source_json(m, *s, v);
+        core(src);
+        for (const char* k : {"caps", "device_id", "parents", "clock_name", "format"}) CHECK_MESSAGE(src.contains(k), k);
+        const auto snd = nmos_sender_json(m, *s, v);
+        core(snd);
+        for (const char* k : {"flow_id", "transport", "device_id", "manifest_href", "interface_bindings", "subscription"}) CHECK_MESSAGE(snd.contains(k), k);
+        core(nmos_flow_json(m, *s, v));
+    }
+    CHECK(nmos_source_json(m, audio, v).at("channels").size() == 16);
+    const auto vf = nmos_flow_json(m, video, v);
+    for (const char* k : {"frame_width", "frame_height", "colorspace", "source_id", "device_id", "parents"}) CHECK_MESSAGE(vf.contains(k), k);
+    CHECK(vf.at("version") == v);
+    CHECK(nmos_flow_json(m, audio, v).contains("sample_rate"));
 }

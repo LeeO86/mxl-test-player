@@ -130,6 +130,25 @@ OutputIds Output::ids() const {
     return ids_;
 }
 
+Output::FlowDefs Output::flow_defs(const OutputIds& ids, const OutputConfig& cfg, const VideoFormat& fmt) {
+    const std::string group = cfg.label;
+    FlowDefs d;
+    d.video = video_flow_json(ids.video_flow, cfg.label, group, "Video", fmt, cfg.key_mode == KeyMode::V210a, ids.video_source, ids.device);
+    d.audio = audio_flow_json(ids.audio_flow, cfg.label + " audio", group, cfg.audio_channels, ids.audio_source, ids.device);
+    if (cfg.anc) d.data = data_flow_json(ids.data_flow, cfg.label + " data", group, fmt, ids.data_source, ids.device);
+    if (cfg.key_mode == KeyMode::FillKey) d.key = video_flow_json(ids.key_flow, cfg.label + " key", group, "Key", fmt, false, ids.key_source, ids.device);
+    return d;
+}
+
+std::vector<std::string> Output::flow_definitions() const {
+    std::lock_guard lock(mu_);
+    const auto d = flow_defs(ids_, cfg_, fmt_);
+    std::vector<std::string> out;
+    for (const auto* s : {&d.video, &d.audio, &d.data, &d.key})
+        if (!s->empty()) out.push_back(*s);
+    return out;
+}
+
 VideoFormat Output::format() const {
     std::lock_guard lock(mu_);
     return fmt_;
@@ -248,17 +267,12 @@ void Output::reopen(const OutputConfig& cfg, const VideoFormat& fmt) {
         flows_open_ = false;
     }
     ids_ = derive_output_ids(node_, index_, fmt, cfg.audio_channels, cfg.key_mode == KeyMode::V210a);
-    const std::string group = cfg.label;
+    const auto defs = flow_defs(ids_, cfg, fmt);
     try {
-        video_.open(mxl_, video_flow_json(ids_.video_flow, cfg.label, group, "Video", fmt, cfg.key_mode == KeyMode::V210a, ids_.video_source,
-                                          ids_.device));
-        audio_.open(mxl_, audio_flow_json(ids_.audio_flow, cfg.label + " audio", group, cfg.audio_channels, ids_.audio_source, ids_.device));
-        if (cfg.anc) {
-            data_.open(mxl_, data_flow_json(ids_.data_flow, cfg.label + " data", group, fmt, ids_.data_source, ids_.device));
-        }
-        if (cfg.key_mode == KeyMode::FillKey) {
-            key_.open(mxl_, video_flow_json(ids_.key_flow, cfg.label + " key", group, "Key", fmt, false, ids_.key_source, ids_.device));
-        }
+        video_.open(mxl_, defs.video);
+        audio_.open(mxl_, defs.audio);
+        if (!defs.data.empty()) data_.open(mxl_, defs.data);
+        if (!defs.key.empty()) key_.open(mxl_, defs.key);
         flows_open_ = true;
     } catch (const std::exception& ex) {
         log_error(std::string("flow open failed: ") + ex.what());
