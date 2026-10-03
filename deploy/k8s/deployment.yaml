@@ -21,7 +21,7 @@ spec:
         fsGroup: 1000
       containers:
         - name: player
-          image: ghcr.io/leeo86/mxl-test-player:latest
+          image: ghcr.io/leeo86/mxl-test-player:nightly-dev
           imagePullPolicy: IfNotPresent
           ports:
             - name: web
