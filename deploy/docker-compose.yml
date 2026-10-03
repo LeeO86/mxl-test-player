@@ -12,8 +12,10 @@ services:
       - "3210:3210"
 
   player:
-    image: ghcr.io/leeo86/mxl-test-player:latest
-    build: ..
+    image: ghcr.io/leeo86/mxl-test-player:nightly-dev
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
     network_mode: host
     user: "1000:1000"
     environment:

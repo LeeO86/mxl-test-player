@@ -20,3 +20,5 @@ Status: v1 implemented against draft spec v0.3. Deviations are recorded here, as
 ## Build
 
 MXL `release/v1.1` commit `218ddaa0a08c12ffe75fc475ae65aa3d9eef16d7` is fetched at configure time and compiled with fabrics off. fmt, spdlog, stduuid, and picojson are fetched the same way. The player links that static `libmxl`.
+
+Container publish matches the sibling media functions. `.github/workflows/container.yaml` builds `docker/Dockerfile` and pushes `ghcr.io/leeo86/mxl-test-player` (`nightly-dev` and `git-<sha>` from `main`, semver plus `latest` from `v*.*.*` tags). Pull requests build the image and do not push it. The image label `io.dmf.mxl.revision` is the pinned MXL commit. The runtime image runs as uid 1000 and carries the bundled web UI, DejaVu fonts, and the distro FFmpeg CLI.
