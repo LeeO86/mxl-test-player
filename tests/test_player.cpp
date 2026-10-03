@@ -5,17 +5,24 @@
 #include "format.hpp"
 #include "ids.hpp"
 #include "motion.hpp"
+#include "mxl_io.hpp"
 #include "pattern.hpp"
 #include "placeholders.hpp"
 #include "playlist.hpp"
+#include "process.hpp"
 #include "timecode.hpp"
 #include "uuid_util.hpp"
 #include "v210.hpp"
 
 #include <doctest.h>
+#include <nlohmann/json.hpp>
 
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <thread>
 #include <vector>
 
 using namespace mtp;
@@ -310,4 +317,87 @@ TEST_CASE("config env overrides file and ids are stable") {
     CHECK(a.video_flow.str().size() == 36);
     // Source id does not include the format, so a source swap would not retarget it.
     CHECK(a.video_source == c.video_source);
+}
+
+TEST_CASE("platform settings, aliases and announce address") {
+    const char* env[] = {"NMOS_SEED=sport-player",
+                         "HOST_ID=should-not-win",
+                         "NMOS_LABEL=Sport",
+                         "NMOS_TAGS={\"urn:x-srf:production\":[\"sport-sa\"],\"urn:x-srf:function\":[\"player1\"]}",
+                         "NMOS_REGISTRY_ADDRESS=10.0.0.5",
+                         "NMOS_REGISTRY_PORT=4000",
+                         "NMOS_HOST_ADDRESS=10.1.2.3",
+                         "CONFIG_DIR=/tmp/player-cfg",
+                         "MXL_DOMAIN_SCAN_PATH=/tmp/mxl-root",
+                         "MXL_HISTORY_DURATION_NS=5000000000",
+                         "MXL_CLEANUP_ON_EXIT=true",
+                         "SHUTDOWN_TIMEOUT_S=12",
+                         "PLAYER_FORMAT=1080p50",
+                         "PLAYER_OUTPUTS=1",
+                         nullptr};
+    auto cfg = load_config("", env);
+    CHECK(cfg.nmos_seed == "sport-player");
+    CHECK(cfg.nmos_label == "Sport");
+    CHECK(cfg.nmos_tags["urn:x-srf:production"][0] == "sport-sa");
+    CHECK(cfg.nmos_query_address == "10.0.0.5");
+    CHECK(cfg.nmos_query_port == 4001);
+    CHECK(cfg.nmos_host_address == "10.1.2.3");
+    CHECK(cfg.config_dir == "/tmp/player-cfg");
+    CHECK(cfg.config_path == "/tmp/player-cfg/player.json");
+    CHECK(cfg.state_path == "/tmp/player-cfg/state.json");
+    CHECK(cfg.mxl_domain_dir == "/tmp/mxl-root/player-sport-player");
+    CHECK(cfg.history_duration_ns == 5000000000ull);
+    CHECK(cfg.mxl_cleanup_on_exit);
+    CHECK(cfg.shutdown_timeout_s == 12);
+    CHECK_FALSE(cfg.nmos_dns_sd);
+
+    const char* alias[] = {"NMOS_SEED=alias-player", "NMOS_HOST_ADDRESS=10.9.8.7", "PLAYER_STATE=/tmp/legacy-state.json", "PLAYER_FORMAT=1080p50",
+                           "PLAYER_OUTPUTS=1", nullptr};
+    auto aliased = load_config("", alias);
+    CHECK(aliased.state_path == "/tmp/legacy-state.json");
+
+    const char* host_id[] = {"HOST_ID=box-a", "NMOS_HOST_ADDRESS=10.9.8.7", "PLAYER_FORMAT=1080p50", "PLAYER_OUTPUTS=1", nullptr};
+    CHECK(load_config("", host_id).nmos_seed == "box-a-player");
+
+    const char* bad_host[] = {"NMOS_HOST_ADDRESS=player-pod", "NMOS_SEED=x", "PLAYER_FORMAT=1080p50", "PLAYER_OUTPUTS=1", nullptr};
+    CHECK_THROWS_AS(load_config("", bad_host), ConfigError);
+    const char* loop[] = {"NMOS_HOST_ADDRESS=127.0.0.1", "NMOS_SEED=x", "PLAYER_FORMAT=1080p50", "PLAYER_OUTPUTS=1", nullptr};
+    CHECK_THROWS_AS(load_config("", loop), ConfigError);
+    const char* dns[] = {"NMOS_DNS_SD=true", "NMOS_HOST_ADDRESS=10.1.2.3", "NMOS_SEED=x", "PLAYER_FORMAT=1080p50", "PLAYER_OUTPUTS=1", nullptr};
+    CHECK_THROWS_AS(load_config("", dns), ConfigError);
+
+    auto detected = detect_announce_address();
+    CHECK(ipv4_literal(detected));
+    CHECK(detected.rfind("127.", 0) != 0);
+}
+
+TEST_CASE("output domain is created once and not overwritten") {
+    const auto dir = std::filesystem::path("/tmp/mxl-domain-unit");
+    std::filesystem::remove_all(dir);
+    ensure_output_domain(dir.string(), "11111111-1111-5111-8111-111111111111", 1000000000ull);
+    const auto def = dir / "domain_def.json";
+    const auto opt = dir / "options.json";
+    CHECK(std::filesystem::exists(def));
+    const auto first = std::filesystem::last_write_time(def);
+    const auto opt_first = std::filesystem::last_write_time(opt);
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    ensure_output_domain(dir.string(), "11111111-1111-5111-8111-111111111111", 42);
+    CHECK(std::filesystem::last_write_time(def) == first);
+    CHECK(std::filesystem::last_write_time(opt) == opt_first);
+    std::ifstream in(opt);
+    nlohmann::json j;
+    in >> j;
+    CHECK(j["urn:x-mxl:option:history_duration/v1.0"] == 1000000000ull);
+    CHECK_THROWS_AS(ensure_output_domain(dir.string(), "22222222-2222-5222-8222-222222222222", 1000000000ull), ConfigError);
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("stop_children does not wait out a long job") {
+    const auto start = std::chrono::steady_clock::now();
+    std::thread worker([] { run_process({"/bin/sleep", "30"}); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    stop_children();
+    worker.join();
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    CHECK(ms < 5000);
 }

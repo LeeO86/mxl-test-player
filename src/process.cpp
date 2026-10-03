@@ -7,9 +7,29 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <atomic>
 #include <array>
+#include <mutex>
 
 namespace mtp {
+namespace {
+std::mutex g_pid_mu;
+std::vector<pid_t> g_pids;
+std::atomic<bool> g_stop{false};
+}  // namespace
+
+void stop_children() {
+    g_stop = true;
+    std::vector<pid_t> copy;
+    {
+        std::lock_guard lock(g_pid_mu);
+        copy = g_pids;
+    }
+    for (pid_t pid : copy) kill(pid, SIGTERM);
+    usleep(200000);
+    for (pid_t pid : copy) kill(pid, SIGKILL);
+}
 
 ProcessResult run_process(const std::vector<std::string>& args, const std::function<void(std::string_view)>& on_stdout) {
     ProcessResult result;
@@ -39,6 +59,10 @@ ProcessResult run_process(const std::vector<std::string>& args, const std::funct
         execvp(argv[0], argv.data());
         _exit(127);
     }
+    {
+        std::lock_guard lock(g_pid_mu);
+        g_pids.push_back(pid);
+    }
     close(out_pipe[1]);
     close(err_pipe[1]);
     fcntl(out_pipe[0], F_SETFL, O_NONBLOCK);
@@ -62,7 +86,11 @@ ProcessResult run_process(const std::vector<std::string>& args, const std::funct
             fds[nfd].events = POLLIN;
             ++nfd;
         }
-        const int pr = poll(fds, static_cast<nfds_t>(nfd), 1000);
+        const int pr = poll(fds, static_cast<nfds_t>(nfd), 200);
+        if (g_stop) {
+            kill(pid, SIGKILL);
+            break;
+        }
         if (pr < 0) break;
         auto drain = [&](int idx, int fd, bool is_out) {
             if (idx < 0) return;
@@ -105,6 +133,10 @@ ProcessResult run_process(const std::vector<std::string>& args, const std::funct
     close(err_pipe[0]);
     int status = 0;
     waitpid(pid, &status, 0);
+    {
+        std::lock_guard lock(g_pid_mu);
+        g_pids.erase(std::remove(g_pids.begin(), g_pids.end(), pid), g_pids.end());
+    }
     if (WIFEXITED(status)) result.code = WEXITSTATUS(status);
     else result.code = -1;
     if (!on_stdout) result.output = stdout_buf + result.output;

@@ -37,19 +37,21 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          # Releases (v* tags) get 1.2.3 / 1.2 / 1 and `latest`.
-          # Pushes to main and manual runs get `nightly-dev` plus a git- sha.
+          # main and manual runs: nightly-dev (the one moving tag) and git-<sha7>.
+          # vX.Y.Z tags: X.Y.Z, X.Y and X. Those tags are never moved.
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
             type=raw,value=nightly-dev,enable=${{ !startsWith(github.ref, 'refs/tags/') }}
-            type=sha,prefix=git-
+            type=sha,prefix=git-,format=short
           flavor: |
-            latest=${{ startsWith(github.ref, 'refs/tags/') }}
+            latest=false
           labels: |
             org.opencontainers.image.title=mxl-test-player
             org.opencontainers.image.description=MXL test and demo source
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.licenses=MIT
             io.dmf.mxl.revision=218ddaa0a08c12ffe75fc475ae65aa3d9eef16d7
 

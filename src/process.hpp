@@ -16,4 +16,7 @@ struct ProcessResult {
 // instead of being captured. stderr is always captured into `output`.
 ProcessResult run_process(const std::vector<std::string>& args, const std::function<void(std::string_view)>& on_stdout = {});
 
+// SIGTERM then SIGKILL every child started by run_process. Does not wait for them to exit.
+void stop_children();
+
 }  // namespace mtp

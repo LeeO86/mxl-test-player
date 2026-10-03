@@ -26,6 +26,12 @@ public:
     using std::runtime_error::runtime_error;
 };
 
+// Invalid configuration. main() exits 78.
+class ConfigError : public Error {
+public:
+    using Error::Error;
+};
+
 inline std::string hex_u64(std::uint64_t v) {
     char b[17];
     std::snprintf(b, sizeof(b), "%016llx", static_cast<unsigned long long>(v));

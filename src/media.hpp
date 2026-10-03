@@ -62,6 +62,7 @@ public:
     bool remove(const std::string& id, std::string& error);
     bool update_meta(const std::string& id, const std::string& name, const std::vector<std::string>& tags, std::string& error);
     void mark_used(const std::string& id, bool used);
+    void purge_uploads();
 
     void ensure_format(const std::string& id, const VideoFormat& format);
 

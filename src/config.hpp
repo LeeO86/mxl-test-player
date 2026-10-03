@@ -95,13 +95,23 @@ struct Config {
     double ram_clip_max_s = 20;
     int ram_budget_mb = 4096;
     int preroll_frames = 25;
+    std::string config_dir = "/config";
+    std::string mxl_scan_path = "/Volumes/mxl";
     std::string mxl_domain_dir;
     std::string mxl_domain_id;
+    std::uint64_t history_duration_ns = 1000000000ull;
+    bool mxl_cleanup_on_exit = false;
     std::string nmos_registry_address;
     int nmos_registry_port = 3210;
+    std::string nmos_query_address;
+    int nmos_query_port = 3211;
     bool nmos_dns_sd = false;
     int nmos_port = 3282;
     std::string nmos_seed;
+    std::string nmos_label = "MXL Test Player";
+    nlohmann::json nmos_tags = nlohmann::json::object();
+    std::string nmos_host_address;
+    int shutdown_timeout_s = 10;
     int web_port = 8130;
     std::string config_path = "/config/player.json";
     std::string state_path = "/config/state.json";
@@ -115,6 +125,9 @@ struct Config {
 // env > file > defaults. Throws Error on invalid values (caller exits 78).
 Config load_config(const std::string& file_path, const char* const* envp);
 
-std::string default_domain_dir(const std::string& seed);
+std::string default_domain_dir(const std::string& seed, const std::string& scan_path = "/Volumes/mxl");
+bool ipv4_literal(std::string_view s);
+std::string detect_announce_address();
+void require_announce_address(const std::string& ip);
 
 }  // namespace mtp

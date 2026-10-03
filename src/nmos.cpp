@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <cstdlib>
 #include <sstream>
 
 namespace mtp {
@@ -24,6 +25,10 @@ std::string http_exchange(const std::string& host, int port, const std::string& 
         freeaddrinfo(res);
         return {};
     }
+    timeval tv{};
+    tv.tv_sec = 2;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
     if (connect(fd, res->ai_addr, res->ai_addrlen) != 0) {
         close(fd);
         freeaddrinfo(res);
@@ -45,6 +50,12 @@ std::string http_exchange(const std::string& host, int port, const std::string& 
     }
     close(fd);
     return out;
+}
+
+int http_status(const std::string& response) {
+    const auto sp = response.find(' ');
+    if (sp == std::string::npos) return 0;
+    return std::atoi(response.c_str() + sp + 1);
 }
 
 std::string json_escape(const std::string& s) {
@@ -70,16 +81,37 @@ void NmosNode::update(NmosModel model) {
     model_ = std::move(model);
 }
 
-void NmosNode::start(const std::string& registry_host, int registry_port) {
+void NmosNode::start(const std::string& registry_host, int registry_port, const std::string& query_host, int query_port) {
     registry_host_ = registry_host;
     registry_port_ = registry_port;
+    query_host_ = query_host.empty() ? registry_host : query_host;
+    query_port_ = query_port;
     stop_ = false;
+    registered_ = false;
     if (!registry_host.empty()) reg_ = std::thread([this, registry_host, registry_port] { registry_loop(registry_host, registry_port); });
 }
 
 void NmosNode::stop() {
     stop_ = true;
     if (reg_.joinable()) reg_.join();
+}
+
+bool NmosNode::registry_configured() const { return !registry_host_.empty(); }
+
+void NmosNode::deregister() {
+    stop_ = true;
+    if (reg_.joinable()) reg_.join();
+    std::string node_id;
+    {
+        std::lock_guard lock(mu_);
+        node_id = model_.node_id;
+    }
+    if (registry_host_.empty() || node_id.empty()) return;
+    const auto resp = http_exchange(registry_host_, registry_port_, "DELETE", "/x-nmos/registration/v1.3/resource/nodes/" + node_id, "");
+    const int code = http_status(resp);
+    if (code >= 200 && code < 300) log_info("deregistered NMOS node " + node_id);
+    else log_error("NMOS deregister of " + node_id + " returned " + std::to_string(code));
+    registered_ = false;
 }
 
 bool NmosNode::master_enabled(const std::string& sender_id) const {
@@ -99,17 +131,22 @@ void NmosNode::registry_loop(std::string host, int port) {
         if (!m.node_id.empty()) {
             const auto v = version();
             auto post = [&](const std::string& type, const std::string& data) {
-                http_exchange(host, port, "POST", "/x-nmos/registration/v1.3/resource",
-                              std::string("{\"type\":\"") + type + "\",\"data\":" + data + "}");
+                return http_exchange(host, port, "POST", "/x-nmos/registration/v1.3/resource",
+                                     std::string("{\"type\":\"") + type + "\",\"data\":" + data + "}");
             };
+            const std::string tags = m.tags.dump();
             const std::string href = "http://" + m.host + ":" + std::to_string(m.api_port);
-            post("node", "{\"id\":\"" + m.node_id + "\",\"version\":\"" + v + "\",\"label\":\"" + json_escape(m.label) +
-                             "\",\"href\":\"" + href + "/x-nmos/node/v1.3/self\",\"hostname\":\"" + json_escape(m.host) +
-                             "\",\"api\":{\"versions\":[\"v1.3\"],\"endpoints\":[{\"host\":\"" + json_escape(m.host) + "\",\"port\":" +
-                             std::to_string(m.api_port) + ",\"protocol\":\"http\"}]},\"caps\":{},\"services\":[],\"clocks\":[{\"name\":\"clk0\",\"ref_type\":\"internal\"}]}");
+            const std::string control = href + "/x-nmos/connection/v1.1/";
+            const auto node_resp = post(
+                "node", "{\"id\":\"" + m.node_id + "\",\"version\":\"" + v + "\",\"label\":\"" + json_escape(m.label) + "\",\"href\":\"" + href +
+                            "/x-nmos/node/v1.3/self\",\"hostname\":\"" + json_escape(m.host) +
+                            "\",\"api\":{\"versions\":[\"v1.3\"],\"endpoints\":[{\"host\":\"" + json_escape(m.host) + "\",\"port\":" +
+                            std::to_string(m.api_port) + ",\"protocol\":\"http\"}]},\"caps\":{},\"services\":[],\"clocks\":[{\"name\":\"clk0\",\"ref_type\":\"internal\"}],\"tags\":" +
+                            tags + "}");
             post("device", "{\"id\":\"" + m.device_id + "\",\"version\":\"" + v + "\",\"label\":\"" + json_escape(m.label) +
-                              "\",\"type\":\"urn:x-nmos:device:generic\",\"node_id\":\"" + m.node_id +
-                              "\",\"senders\":[],\"receivers\":[],\"controls\":[]}");
+                               "\",\"type\":\"urn:x-nmos:device:generic\",\"node_id\":\"" + m.node_id +
+                               "\",\"senders\":[],\"receivers\":[],\"controls\":[{\"href\":\"" + control +
+                               "\",\"type\":\"urn:x-nmos:control:sr-ctrl/v1.1\"}],\"tags\":" + tags + "}");
             for (std::size_t i = 0; i < m.senders.size(); ++i) {
                 const auto& s = m.senders[i];
                 post("source", "{\"id\":\"" + s.source_id + "\",\"version\":\"" + v + "\",\"label\":\"" + json_escape(s.label) +
@@ -125,7 +162,16 @@ void NmosNode::registry_loop(std::string host, int port) {
                                    "\",\"manifest_href\":null,\"interface_bindings\":[],\"subscription\":{\"receiver_id\":null,\"active\":" +
                                    std::string(s.master_enable ? "true" : "false") + "}}");
             }
-            http_exchange(host, port, "POST", "/x-nmos/registration/v1.3/health/nodes/" + m.node_id, "");
+            const auto health = http_exchange(host, port, "POST", "/x-nmos/registration/v1.3/health/nodes/" + m.node_id, "");
+            const int posted = http_status(node_resp);
+            const int health_code = http_status(health);
+            bool ok = (posted >= 200 && posted < 300) || (health_code >= 200 && health_code < 300);
+            if (ok && !query_host_.empty()) {
+                const auto q = http_exchange(query_host_, query_port_, "GET", "/x-nmos/query/v1.3/nodes/" + m.node_id, "");
+                const int qc = http_status(q);
+                ok = qc >= 200 && qc < 300;
+            }
+            registered_ = ok;
         }
         for (int i = 0; i < 50 && !stop_; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
@@ -174,13 +220,15 @@ void NmosNode::handle(const HttpRequest& req, HttpResponse& res) {
         text("{\"id\":\"" + m.node_id + "\",\"version\":\"" + v + "\",\"label\":\"" + json_escape(m.label) + "\",\"description\":\"MXL test and demo source\",\"hostname\":\"" +
              json_escape(m.host) + "\",\"href\":\"" + base +
              "/x-nmos/node/v1.3/self\",\"api\":{\"versions\":[\"v1.3\"],\"endpoints\":[{\"host\":\"" + json_escape(m.host) + "\",\"port\":" +
-             std::to_string(m.api_port) + ",\"protocol\":\"http\"}]},\"caps\":{},\"services\":[],\"clocks\":[{\"name\":\"clk0\",\"ref_type\":\"internal\"}],\"tags\":{}}");
+             std::to_string(m.api_port) + ",\"protocol\":\"http\"}]},\"caps\":{},\"services\":[],\"clocks\":[{\"name\":\"clk0\",\"ref_type\":\"internal\"}],\"tags\":" +
+             m.tags.dump() + "}");
         return;
     }
     if (path == "/x-nmos/node/v1.3/devices" || path == "/x-nmos/node/v1.3/devices/") {
         text("[{\"id\":\"" + m.device_id + "\",\"version\":\"" + v + "\",\"label\":\"" + json_escape(m.label) +
              "\",\"description\":\"MXL Test Player\",\"type\":\"urn:x-nmos:device:generic\",\"node_id\":\"" + m.node_id +
-             "\",\"senders\":[],\"receivers\":[],\"controls\":[],\"tags\":{}}]");
+             "\",\"senders\":[],\"receivers\":[],\"controls\":[{\"href\":\"" + base +
+             "/x-nmos/connection/v1.1/\",\"type\":\"urn:x-nmos:control:sr-ctrl/v1.1\"}],\"tags\":" + m.tags.dump() + "}]");
         return;
     }
     auto list_senders = [&]() {

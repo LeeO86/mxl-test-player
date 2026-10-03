@@ -15,10 +15,12 @@ spec:
         app: mxl-test-player
         io.dmf.mxl.revision: "0.3.0"
     spec:
+      terminationGracePeriodSeconds: 20
       securityContext:
         runAsUser: 1000
         runAsGroup: 1000
         fsGroup: 1000
+        supplementalGroups: [1000]
       containers:
         - name: player
           image: ghcr.io/leeo86/mxl-test-player:nightly-dev
@@ -37,10 +39,36 @@ spec:
               value: "16"
             - name: PLAYER_LIBRARY_DIR
               value: /data/library
+            - name: CONFIG_DIR
+              value: /config
+            - name: MXL_DOMAIN_SCAN_PATH
+              value: /Volumes/mxl
             - name: MXL_OUTPUT_DOMAIN_DIR
               value: /Volumes/mxl/player
+            - name: MXL_CLEANUP_ON_EXIT
+              value: "true"
+            - name: SHUTDOWN_TIMEOUT_S
+              value: "10"
+            - name: NMOS_SEED
+              value: demo-player
+            - name: NMOS_LABEL
+              value: Demo player
+            - name: NMOS_TAGS
+              value: '{"urn:x-srf:production":["demo"],"urn:x-srf:function":["player"]}'
+            - name: NMOS_REGISTRY_ADDRESS
+              value: nmos-registry.mxl.svc.cluster.local
+            - name: NMOS_REGISTRY_PORT
+              value: "3210"
+            - name: NMOS_QUERY_ADDRESS
+              value: nmos-registry.mxl.svc.cluster.local
+            - name: NMOS_QUERY_PORT
+              value: "3211"
             - name: NMOS_DNS_SD
               value: "false"
+            - name: NMOS_HOST_ADDRESS
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
             - name: WEB_PORT
               value: "8130"
             - name: NMOS_PORT

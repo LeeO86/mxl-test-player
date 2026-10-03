@@ -307,6 +307,11 @@ bool Library::update_meta(const std::string& id, const std::string& name, const 
     return false;
 }
 
+void Library::purge_uploads() {
+    std::error_code ec;
+    fs::remove_all(fs::path(cfg_.library_dir) / "_uploads", ec);
+}
+
 void Library::mark_used(const std::string& id, bool used) {
     std::lock_guard lock(mu_);
     for (auto& it : items_)

@@ -7,6 +7,8 @@
 #include <mxl/mxl.h>
 #include <mxl/time.h>
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
@@ -37,21 +39,45 @@ std::string safe_group(std::string label) {
 
 }  // namespace
 
+void ensure_output_domain(const std::string& domain_dir, const std::string& domain_id, std::uint64_t history_duration_ns) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::create_directories(domain_dir, ec);
+    if (ec) throw Error("cannot create MXL domain " + domain_dir + ": " + ec.message());
+    const auto def_path = fs::path(domain_dir) / "domain_def.json";
+    if (fs::exists(def_path)) {
+        std::ifstream in(def_path);
+        nlohmann::json existing;
+        try {
+            in >> existing;
+        } catch (const std::exception& ex) {
+            throw ConfigError(std::string("existing domain_def.json is not JSON: ") + ex.what());
+        }
+        const auto id = existing.value("id", "");
+        if (id != domain_id) {
+            throw ConfigError("domain_def.json in " + domain_dir + " has id " + id + " which does not match MXL_OUTPUT_DOMAIN_ID " +
+                              domain_id + "; refusing to overwrite another domain");
+        }
+    } else {
+        std::ofstream out(def_path);
+        out << nlohmann::json{{"id", domain_id}, {"label", "MXL Test Player"}}.dump(2) << "\n";
+        if (!out) throw Error("cannot write " + def_path.string());
+    }
+    const auto opt_path = fs::path(domain_dir) / "options.json";
+    if (!fs::exists(opt_path)) {
+        std::ofstream out(opt_path);
+        out << nlohmann::json{{"urn:x-mxl:option:history_duration/v1.0", history_duration_ns}}.dump(2) << "\n";
+        if (!out) throw Error("cannot write " + opt_path.string());
+    }
+}
+
 MxlSession::~MxlSession() { close(); }
 
-void MxlSession::open(const std::string& domain_dir, const std::string& domain_id) {
+void MxlSession::open(const std::string& domain_dir, const std::string& domain_id, std::uint64_t history_duration_ns) {
     close();
     domain_ = domain_dir;
     domain_id_ = domain_id;
-    std::filesystem::create_directories(domain_);
-    {
-        std::ofstream out(std::filesystem::path(domain_) / "domain_def.json");
-        out << "{\n  \"id\": \"" << domain_id << "\",\n  \"label\": \"MXL Test Player\"\n}\n";
-    }
-    {
-        std::ofstream out(std::filesystem::path(domain_) / "options.json");
-        out << "{\n  \"urn:x-mxl:option:history_duration/v1.0\": 1000000000\n}\n";
-    }
+    ensure_output_domain(domain_, domain_id_, history_duration_ns);
     instance_ = mxlCreateInstance(domain_.c_str(), nullptr);
     if (!instance_) throw Error("mxlCreateInstance failed for " + domain_);
     mxlGarbageCollectFlows(static_cast<mxlInstance>(instance_));
@@ -67,6 +93,20 @@ void MxlSession::close() {
         mxlDestroyInstance(static_cast<mxlInstance>(instance_));
         instance_ = nullptr;
     }
+}
+
+void MxlSession::remove_own_domain() {
+    if (domain_.empty()) return;
+    const auto name = std::filesystem::path(domain_).filename().string();
+    if (name.empty() || name == "mxl" || name == "." || name == "..") {
+        log_error("refusing to remove MXL path " + domain_);
+        return;
+    }
+    std::error_code ec;
+    std::filesystem::remove_all(domain_, ec);
+    if (ec) log_error("failed to remove own domain " + domain_ + ": " + ec.message());
+    else log_info("removed own MXL domain " + domain_);
+    domain_.clear();
 }
 
 MxlFlow::~MxlFlow() {

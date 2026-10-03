@@ -7,6 +7,9 @@
 #include <cctype>
 #include <cstdlib>
 #include <fstream>
+#include <ifaddrs.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <map>
 
 namespace mtp {
@@ -24,12 +27,12 @@ int parse_int(const std::string& s, const char* key) {
     try {
         std::size_t idx = 0;
         const int v = std::stoi(s, &idx);
-        if (idx != s.size()) throw Error(std::string("invalid integer for ") + key);
+        if (idx != s.size()) throw ConfigError(std::string("invalid integer for ") + key);
         return v;
     } catch (const Error&) {
         throw;
     } catch (...) {
-        throw Error(std::string("invalid integer for ") + key);
+        throw ConfigError(std::string("invalid integer for ") + key);
     }
 }
 
@@ -37,19 +40,19 @@ double parse_double(const std::string& s, const char* key) {
     try {
         std::size_t idx = 0;
         const double v = std::stod(s, &idx);
-        if (idx != s.size()) throw Error(std::string("invalid number for ") + key);
+        if (idx != s.size()) throw ConfigError(std::string("invalid number for ") + key);
         return v;
     } catch (const Error&) {
         throw;
     } catch (...) {
-        throw Error(std::string("invalid number for ") + key);
+        throw ConfigError(std::string("invalid number for ") + key);
     }
 }
 
 bool parse_bool(const std::string& s, const char* key) {
     if (s == "1" || s == "true" || s == "TRUE" || s == "yes" || s == "on") return true;
     if (s == "0" || s == "false" || s == "FALSE" || s == "no" || s == "off") return false;
-    throw Error(std::string("invalid boolean for ") + key);
+    throw ConfigError(std::string("invalid boolean for ") + key);
 }
 
 nlohmann::json text_to_json_local(const TextLayerConfig& t) {
@@ -123,8 +126,8 @@ BurnInConfig parse_burnin(const json& j) {
     if (j.contains("boxes")) {
         for (const auto& t : j.at("boxes")) b.boxes.push_back(box_from_json(t));
     }
-    if (b.texts.size() > 8) throw Error("at most 8 text layers");
-    if (b.boxes.size() > 2) throw Error("at most 2 moving boxes");
+    if (b.texts.size() > 8) throw ConfigError("at most 8 text layers");
+    if (b.boxes.size() > 2) throw ConfigError("at most 2 moving boxes");
     return b;
 }
 
@@ -155,15 +158,18 @@ OutputConfig output_from_json(const json& j, int index) {
 }
 
 void validate(Config& c) {
-    if (c.outputs < 1 || c.outputs > 16) throw Error("PLAYER_OUTPUTS must be 1..16");
-    if (c.audio_channels < 2 || c.audio_channels > 64) throw Error("PLAYER_AUDIO_CHANNELS must be 2..64");
-    if (c.convert_concurrency < 1 || c.convert_concurrency > 8) throw Error("PLAYER_CONVERT_CONCURRENCY must be 1..8");
-    if (c.ram_clip_max_s < 0 || c.ram_clip_max_s > 600) throw Error("PLAYER_RAM_CLIP_MAX_S out of range");
-    if (c.ram_budget_mb < 64) throw Error("PLAYER_RAM_BUDGET_MB too small");
-    if (c.preroll_frames < 1 || c.preroll_frames > 250) throw Error("PLAYER_PREROLL_FRAMES out of range");
-    if (c.web_port < 1 || c.web_port > 65535) throw Error("WEB_PORT out of range");
-    if (c.nmos_port < 1 || c.nmos_port > 65535) throw Error("NMOS_PORT out of range");
-    if (c.nmos_registry_port < 1 || c.nmos_registry_port > 65535) throw Error("NMOS_REGISTRY_PORT out of range");
+    if (c.outputs < 1 || c.outputs > 16) throw ConfigError("PLAYER_OUTPUTS must be 1..16");
+    if (c.audio_channels < 2 || c.audio_channels > 64) throw ConfigError("PLAYER_AUDIO_CHANNELS must be 2..64");
+    if (c.convert_concurrency < 1 || c.convert_concurrency > 8) throw ConfigError("PLAYER_CONVERT_CONCURRENCY must be 1..8");
+    if (c.ram_clip_max_s < 0 || c.ram_clip_max_s > 600) throw ConfigError("PLAYER_RAM_CLIP_MAX_S out of range");
+    if (c.ram_budget_mb < 64) throw ConfigError("PLAYER_RAM_BUDGET_MB too small");
+    if (c.preroll_frames < 1 || c.preroll_frames > 250) throw ConfigError("PLAYER_PREROLL_FRAMES out of range");
+    if (c.web_port < 1 || c.web_port > 65535) throw ConfigError("WEB_PORT out of range");
+    if (c.nmos_port < 1 || c.nmos_port > 65535) throw ConfigError("NMOS_PORT out of range");
+    if (c.nmos_registry_port < 1 || c.nmos_registry_port > 65535) throw ConfigError("NMOS_REGISTRY_PORT out of range");
+    if (c.nmos_query_port < 1 || c.nmos_query_port > 65535) throw ConfigError("NMOS_QUERY_PORT out of range");
+    if (c.shutdown_timeout_s < 1 || c.shutdown_timeout_s > 600) throw ConfigError("SHUTDOWN_TIMEOUT_S out of range");
+    if (c.history_duration_ns < 1000000ull) throw ConfigError("MXL_HISTORY_DURATION_NS too small");
     if (c.output_configs.size() > static_cast<std::size_t>(c.outputs)) c.output_configs.resize(c.outputs);
     while (c.output_configs.size() < static_cast<std::size_t>(c.outputs)) {
         OutputConfig o;
@@ -172,14 +178,14 @@ void validate(Config& c) {
     }
     for (auto& o : c.output_configs) {
         if (o.audio_channels == 0) o.audio_channels = c.audio_channels;
-        if (o.audio_channels < 2 || o.audio_channels > 64) throw Error("output audio_channels must be 2..64");
-        if (!o.format.empty() && !parse_format(o.format)) throw Error("invalid output format " + o.format);
-        if (o.label.empty()) throw Error("output label must not be empty");
-        if (o.burnin.texts.size() > 8) throw Error("at most 8 text layers");
-        if (o.burnin.boxes.size() > 2) throw Error("at most 2 moving boxes");
-        if (o.key_min < 0 || o.key_max > 1023 || o.key_min >= o.key_max) throw Error("invalid key range");
+        if (o.audio_channels < 2 || o.audio_channels > 64) throw ConfigError("output audio_channels must be 2..64");
+        if (!o.format.empty() && !parse_format(o.format)) throw ConfigError("invalid output format " + o.format);
+        if (o.label.empty()) throw ConfigError("output label must not be empty");
+        if (o.burnin.texts.size() > 8) throw ConfigError("at most 8 text layers");
+        if (o.burnin.boxes.size() > 2) throw ConfigError("at most 2 moving boxes");
+        if (o.key_min < 0 || o.key_max > 1023 || o.key_min >= o.key_max) throw ConfigError("invalid key range");
     }
-    if (c.mxl_domain_dir.empty()) c.mxl_domain_dir = default_domain_dir(c.nmos_seed);
+    if (c.mxl_domain_dir.empty()) c.mxl_domain_dir = default_domain_dir(c.nmos_seed, c.mxl_scan_path);
 }
 
 }  // namespace
@@ -230,13 +236,61 @@ const char* key_mode_name(KeyMode m) {
     }
 }
 
-std::string default_domain_dir(const std::string& seed) {
+std::string default_domain_dir(const std::string& seed, const std::string& scan_path) {
     std::string short_id = seed.empty() ? "player" : seed;
     if (short_id.size() > 12) short_id = short_id.substr(0, 12);
     for (char& c : short_id) {
         if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_')) c = '-';
     }
-    return "/Volumes/mxl/player-" + short_id;
+    std::string root = scan_path.empty() ? "/Volumes/mxl" : scan_path;
+    while (root.size() > 1 && root.back() == '/') root.pop_back();
+    return root + "/player-" + short_id;
+}
+
+bool ipv4_literal(std::string_view s) {
+    if (s.empty() || s.size() > 15) return false;
+    int dots = 0;
+    int group = -1;
+    for (char c : s) {
+        if (c == '.') {
+            if (group < 0 || group > 255) return false;
+            ++dots;
+            group = -1;
+            continue;
+        }
+        if (c < '0' || c > '9') return false;
+        if (group < 0) group = 0;
+        else if (group == 0) return false;
+        group = group * 10 + (c - '0');
+        if (group > 255) return false;
+    }
+    return dots == 3 && group >= 0 && group <= 255;
+}
+
+std::string detect_announce_address() {
+    ifaddrs* ifs = nullptr;
+    if (getifaddrs(&ifs) != 0) throw ConfigError("NMOS_HOST_ADDRESS is unset and no interface address could be read");
+    std::string found;
+    for (auto* it = ifs; it; it = it->ifa_next) {
+        if (!it->ifa_addr || it->ifa_addr->sa_family != AF_INET) continue;
+        const auto* in = reinterpret_cast<sockaddr_in*>(it->ifa_addr);
+        char buf[INET_ADDRSTRLEN] = {};
+        if (!inet_ntop(AF_INET, &in->sin_addr, buf, sizeof(buf))) continue;
+        const std::string ip = buf;
+        if (ip.rfind("127.", 0) == 0) continue;
+        found = ip;
+        break;
+    }
+    freeifaddrs(ifs);
+    if (found.empty()) throw ConfigError("NMOS_HOST_ADDRESS is unset and no non-loopback IPv4 address was found");
+    return found;
+}
+
+void require_announce_address(const std::string& ip) {
+    if (!ipv4_literal(ip)) throw ConfigError("NMOS_HOST_ADDRESS must be an IPv4 address, not a hostname: " + ip);
+    if (ip == "0.0.0.0" || ip.rfind("127.", 0) == 0) {
+        throw ConfigError("NMOS_HOST_ADDRESS must not be " + ip);
+    }
 }
 
 Config load_config(const std::string& file_path, const char* const* envp) {
@@ -250,8 +304,11 @@ Config load_config(const std::string& file_path, const char* const* envp) {
         }
     }
     Config c;
-    c.config_path = file_path.empty() ? "/config/player.json" : file_path;
-    if (auto e = env_get(env, "PLAYER_CONFIG"); !e.empty()) c.config_path = e;
+    c.config_dir = "/config";
+    if (auto e = env_get(env, "CONFIG_DIR"); !e.empty()) c.config_dir = e;
+    if (!file_path.empty()) c.config_path = file_path;
+    else if (auto e = env_get(env, "PLAYER_CONFIG"); !e.empty()) c.config_path = e;
+    else c.config_path = c.config_dir + "/player.json";
 
     json file = json::object();
     {
@@ -260,9 +317,9 @@ Config load_config(const std::string& file_path, const char* const* envp) {
             try {
                 in >> file;
             } catch (const std::exception& ex) {
-                throw Error(std::string("invalid config file: ") + ex.what());
+                throw ConfigError(std::string("invalid config file: ") + ex.what());
             }
-            if (!file.is_object()) throw Error("config file must be a JSON object");
+            if (!file.is_object()) throw ConfigError("config file must be a JSON object");
         }
     }
     auto pick_str = [&](const char* envk, const char* filek, const std::string& def) {
@@ -286,9 +343,12 @@ Config load_config(const std::string& file_path, const char* const* envp) {
         return def;
     };
 
+    if (env_get(env, "CONFIG_DIR").empty() && file.contains("config_dir") && file.at("config_dir").is_string()) {
+        c.config_dir = file.at("config_dir").get<std::string>();
+    }
     const auto fmt = pick_str("PLAYER_FORMAT", "format", "1080p50");
     auto parsed = parse_format(fmt);
-    if (!parsed) throw Error("invalid PLAYER_FORMAT " + fmt);
+    if (!parsed) throw ConfigError("invalid PLAYER_FORMAT " + fmt);
     c.format = *parsed;
     c.outputs = pick_int("PLAYER_OUTPUTS", "outputs_count", 2);
     c.audio_channels = pick_int("PLAYER_AUDIO_CHANNELS", "audio_channels", 16);
@@ -298,20 +358,62 @@ Config load_config(const std::string& file_path, const char* const* envp) {
     c.ram_clip_max_s = pick_dbl("PLAYER_RAM_CLIP_MAX_S", "ram_clip_max_s", 20);
     c.ram_budget_mb = pick_int("PLAYER_RAM_BUDGET_MB", "ram_budget_mb", 4096);
     c.preroll_frames = pick_int("PLAYER_PREROLL_FRAMES", "preroll_frames", 25);
+    c.mxl_scan_path = pick_str("MXL_DOMAIN_SCAN_PATH", "mxl_scan_path", "/Volumes/mxl");
     c.mxl_domain_dir = pick_str("MXL_OUTPUT_DOMAIN_DIR", "mxl_domain_dir", "");
     c.mxl_domain_id = pick_str("MXL_OUTPUT_DOMAIN_ID", "mxl_domain_id", "");
+    if (auto e = env_get(env, "MXL_HISTORY_DURATION_NS"); !e.empty()) {
+        try {
+            std::size_t idx = 0;
+            c.history_duration_ns = std::stoull(e, &idx, 10);
+            if (idx != e.size()) throw ConfigError("invalid integer");
+        } catch (const ConfigError&) {
+            throw;
+        } catch (...) {
+            throw ConfigError("invalid integer for MXL_HISTORY_DURATION_NS");
+        }
+    } else if (file.contains("history_duration_ns") && file.at("history_duration_ns").is_number()) {
+        c.history_duration_ns = file.at("history_duration_ns").get<std::uint64_t>();
+    }
+    c.mxl_cleanup_on_exit = pick_bool("MXL_CLEANUP_ON_EXIT", "mxl_cleanup_on_exit", false);
     c.nmos_registry_address = pick_str("NMOS_REGISTRY_ADDRESS", "nmos_registry_address", "");
     c.nmos_registry_port = pick_int("NMOS_REGISTRY_PORT", "nmos_registry_port", 3210);
+    c.nmos_query_address = pick_str("NMOS_QUERY_ADDRESS", "nmos_query_address", c.nmos_registry_address);
+    c.nmos_query_port = pick_int("NMOS_QUERY_PORT", "nmos_query_port", c.nmos_registry_port + 1);
     c.nmos_dns_sd = pick_bool("NMOS_DNS_SD", "nmos_dns_sd", false);
+    if (c.nmos_dns_sd) throw ConfigError("NMOS_DNS_SD=true is not available; this build has no DNS-SD or Avahi. Set NMOS_DNS_SD=false");
     c.nmos_port = pick_int("NMOS_PORT", "nmos_port", 3282);
     c.nmos_seed = pick_str("NMOS_SEED", "nmos_seed", "");
     if (c.nmos_seed.empty()) {
+        // HOST_ID is a legacy seed prefix, not an address that is announced.
         auto host = env_get(env, "HOST_ID");
         if (host.empty()) host = "host";
         c.nmos_seed = host + "-player";
     }
+    c.nmos_label = pick_str("NMOS_LABEL", "nmos_label", "MXL Test Player");
+    if (auto e = env_get(env, "NMOS_TAGS"); !e.empty()) {
+        try {
+            c.nmos_tags = json::parse(e);
+        } catch (const std::exception& ex) {
+            throw ConfigError(std::string("NMOS_TAGS is not JSON: ") + ex.what());
+        }
+    } else if (file.contains("nmos_tags")) {
+        c.nmos_tags = file.at("nmos_tags");
+    }
+    if (!c.nmos_tags.is_object()) throw ConfigError("NMOS_TAGS must be a JSON object of tag name to string array");
+    for (auto it = c.nmos_tags.begin(); it != c.nmos_tags.end(); ++it) {
+        if (!it.value().is_array()) throw ConfigError("NMOS_TAGS values must be arrays of strings");
+        for (const auto& v : it.value()) {
+            if (!v.is_string()) throw ConfigError("NMOS_TAGS values must be arrays of strings");
+        }
+    }
+    c.nmos_host_address = pick_str("NMOS_HOST_ADDRESS", "nmos_host_address", "");
+    if (c.nmos_host_address.empty()) c.nmos_host_address = detect_announce_address();
+    require_announce_address(c.nmos_host_address);
+    c.shutdown_timeout_s = pick_int("SHUTDOWN_TIMEOUT_S", "shutdown_timeout_s", 10);
     c.web_port = pick_int("WEB_PORT", "web_port", 8130);
-    c.state_path = pick_str("PLAYER_STATE", "state_path", "/config/state.json");
+    if (auto e = env_get(env, "PLAYER_STATE"); !e.empty()) c.state_path = e;
+    else if (file.contains("state_path") && file.at("state_path").is_string()) c.state_path = file.at("state_path").get<std::string>();
+    else c.state_path = c.config_dir + "/state.json";
     c.font_dir = pick_str("PLAYER_FONT_DIR", "font_dir", "");
     c.web_root = pick_str("PLAYER_WEB_ROOT", "web_root", "");
     c.sprite_max_px = pick_int("PLAYER_SPRITE_MAX_PX", "sprite_max_px", 512);
