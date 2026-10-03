@@ -10,6 +10,12 @@ cd web && npm install && npm run build && cd ..
 ./build/mxl-test-player
 ```
 
+Container images are `ghcr.io/leeo86/mxl-test-player`. Pushes to `main` publish `nightly-dev` and `git-<sha>`. Version tags `v1.2.3` also publish `1.2.3`, `1.2`, `1` and `latest`. The workflow is `.github/workflows/container.yaml`, and the image definition is `docker/Dockerfile`.
+
+```bash
+docker build -f docker/Dockerfile -t mxl-test-player .
+```
+
 Open `http://localhost:8130`. NMOS node API defaults to port 3282.
 
 Configuration is environment over `/config/player.json` over the defaults in the spec. Invalid configuration exits 78. A failure to open the MXL domain exits 75. SIGTERM exits 143.
