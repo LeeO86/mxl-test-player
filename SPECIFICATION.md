@@ -1,6 +1,6 @@
 # mxl-test-player — Specification
 
-Status: Draft v0.3 (for implementation by Claude Code or Cursor in a new, empty repository)
+Status: v1.0.0 stable platform contract. Draft notes below remain the functional spec; section 10 is the settings contract.
 
 Changelog: v0.3 — live custom text burn-ins (§5.5) and a moving box with built-in box or any animated GIF/image as content (§5.6), editable live in the web UI. v0.2 — timecode as ANC flow (§7.1) and alpha/key output for stills (§7.2) are v1 requirements; candidate list updated (§12).
 Repository: `LeeO86/mxl-test-player` (name can still change)
@@ -299,18 +299,32 @@ is kept (configurable retention) so changing the platform format later is possib
 
 ## 8. NMOS
 
-- One Node, one Device ("MXL Test Player"); per output one video sender and one
-  audio sender with Source and Flow, group hint `<output label>:Video` /
-  `<output label>:Audio`; deterministic UUIDv5 IDs.
-- Senders write into the player's own domain (`MXL_OUTPUT_DOMAIN_DIR`, created if
-  missing; stable `domain_def.json` ID, derived or configured; never a mirror
-  domain).
+- One Node, one Device; per output one video sender and one audio sender (plus
+  data and key senders when those flows exist) with Source and Flow. Group hints
+  stay `<output label>:Video` / `:Audio` / `:Data` / `:Key`. Every id is UUIDv5
+  from `NMOS_SEED`.
+- `NMOS_LABEL` is the node label and the device label. `NMOS_TAGS` (JSON object
+  of name to string array) is added to the node and the device.
+- Senders write into the player's own domain only. `domain_def.json` and
+  `options.json` are written when the directory is created and are not rewritten
+  on later starts. A different id already in `domain_def.json` is an error (exit
+  78), not an overwrite.
+- There are no receivers. IS-05 applies to senders: a staged PATCH with
+  `master_enable` and `activate_immediate` starts or stops that flow.
+  `master_enable: false` stops writing. The active enable flags are restored
+  from the state file after a restart.
+- Active IS-05 transport parameters are `mxl_domain_id` and `mxl_flow_id`.
 - A format change of an output mints new flow IDs and updates IS-04 Flows and the
   senders' active params; source changes (pattern ↔ file) do **not** change flows.
-- `master_enable` on a sender starts/stops writing that flow.
 - The IS-04 sender/flow labels SHOULD carry the output label, so multiviewer UMDs
   show it automatically.
-- Static registry, DNS-SD off by default.
+- Static registry only. `NMOS_DNS_SD` defaults to false. `true` exits 78: this
+  build does not browse or advertise DNS-SD and does not need Avahi or D-Bus.
+- The node `href`, API endpoint host and IS-05 control href are the IPv4 address
+  in `NMOS_HOST_ADDRESS` (default: the first non-loopback IPv4). They are never
+  a hostname, `0.0.0.0` or a loopback address.
+- This node does not serve an IS-04 events WebSocket. The UI WebSocket is
+  `/api/v1/events` on `WEB_PORT`. `NMOS_PORT` is the node and connection API.
 
 ---
 
@@ -328,8 +342,15 @@ is kept (configurable retention) so changing the platform format later is possib
 - **Playlists**: create/edit/reorder.
 - **NMOS** and **Settings** pages like the siblings.
 - REST under `/api/v1/…` (outputs, transport, library, uploads, jobs, presets,
-  playlists, config), WebSocket `/api/v1/events`; `/livez`, `/readyz`,
-  `/statusz`, `/metrics`.
+  playlists, config, `config/export`, `config/import`), WebSocket `/api/v1/events`;
+  `/livez`, `/readyz`, `/statusz`, `/metrics`.
+- `GET /api/v1/config/export` returns version 1 JSON: informational deployment
+  fields plus operator state (outputs, presets, playlists). There are no secrets.
+  `POST /api/v1/config/import` restores that operator state. It does not change
+  ports, the registry, or the seed.
+- `/livez` is 200 while the process is running. `/readyz` is 200 when the
+  process is serving and, if `NMOS_REGISTRY_ADDRESS` is set, the Query API lists
+  this node. Otherwise `/readyz` is 503.
 - Unauthenticated by design (lab network). Upload size limit configurable
   (default 20 GB); the platform ingress must allow it.
 
@@ -349,9 +370,29 @@ Configuration (env > file > default; invalid exits 78):
 | `PLAYER_CONVERT_CONCURRENCY` | 1 |
 | `PLAYER_RAM_CLIP_MAX_S` / `PLAYER_RAM_BUDGET_MB` | 20 / 4096 |
 | `PLAYER_PREROLL_FRAMES` | 25 |
-| `MXL_OUTPUT_DOMAIN_DIR` / `MXL_OUTPUT_DOMAIN_ID` | `/Volumes/mxl/player-<seed-short>` / derived |
-| `NMOS_REGISTRY_ADDRESS` / `_PORT`, `NMOS_DNS_SD`, `NMOS_PORT`, `NMOS_SEED` | empty / 3210, false, 3282, `HOST_ID-player` |
-| `WEB_PORT` | 8130 |
+| `CONFIG_DIR` | `/config` (state, presets and playlists live here) |
+| `PLAYER_CONFIG` | `<CONFIG_DIR>/player.json` (alias; `--config` wins) |
+| `PLAYER_STATE` | `<CONFIG_DIR>/state.json` (alias of the state file path) |
+| `MXL_DOMAIN_SCAN_PATH` | `/Volumes/mxl` (parent of the default output domain; this player has no input flows to scan) |
+| `MXL_OUTPUT_DOMAIN_DIR` / `MXL_OUTPUT_DOMAIN_ID` | `<scan>/player-<seed-short>` / UUIDv5 from the seed |
+| `MXL_HISTORY_DURATION_NS` | `1000000000` (written into `options.json` only when that file is created) |
+| `MXL_CLEANUP_ON_EXIT` | false (platform sets true; removes only this output domain) |
+| `NMOS_REGISTRY_ADDRESS` / `NMOS_REGISTRY_PORT` | empty / 3210 |
+| `NMOS_QUERY_ADDRESS` / `NMOS_QUERY_PORT` | registry address / registry port + 1 |
+| `NMOS_DNS_SD` | false (`true` exits 78) |
+| `NMOS_PORT` | 3282 (node and IS-05; no second listener) |
+| `NMOS_SEED` | `HOST_ID` + `-player` when unset. `HOST_ID` is only this seed alias, never an announced address |
+| `NMOS_LABEL` | `MXL Test Player` |
+| `NMOS_TAGS` | `{}` |
+| `NMOS_HOST_ADDRESS` | first non-loopback IPv4. Rejects names, `0.0.0.0` and loopback |
+| `SHUTDOWN_TIMEOUT_S` | 10 |
+| `WEB_PORT` | 8130 (UI, REST, `/api/v1/events`, probes, `/metrics`) |
+
+Unknown environment variables are ignored. A port that cannot be bound exits 75.
+SIGTERM stops ffmpeg children immediately, releases MXL writers, DELETEs the
+node from the registry, and with `MXL_CLEANUP_ON_EXIT=true` removes only this
+output domain, then exits 143. The work is bounded by `SHUTDOWN_TIMEOUT_S`.
+Operator state is only under `CONFIG_DIR`. Nothing secret is logged or exported.
 
 Metrics (prefix `mxl_test_player_`): `output_state`, `grains_written_total`,
 `underruns_total`, `loops_total`, `source_info` (info gauge), `decode_ahead_frames`,
@@ -379,7 +420,12 @@ mezzanine on a Precision 3930 class CPU with zero underruns over 1 h; 2 outputs
   (frequency/level via FFT, ident cadence), A/V sync alignment (flash frame index
   equals beep sample index / cadence), 59.94 audio cadence over 1000 grains,
   loop conforming (video frames × cadence = audio samples), playlist sequencing,
-  config precedence, ID derivation.
+  config precedence, ID derivation, announce-address rejection, domain files
+  created once, and child-process shutdown.
+- Integration (CI, CPU): with a stand-in registry, `/readyz` stays 503 until the
+  Query API lists the node, then 200; `config/export` round-trips through
+  `config/import`; SIGTERM exits 143, the registry receives DELETE, the own
+  domain and `_uploads` are removed.
 - Integration (CI, CPU): upload a short 1080i50 H.264 clip with stereo AAC; the
   conversion produces a 1080p50 mezzanine with matching audio length; an output
   plays it in a loop for 3 loops: grain count equals TAI elapsed, no underruns,

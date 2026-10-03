@@ -27,6 +27,9 @@ int main(int argc, char** argv) {
     mtp::Config cfg;
     try {
         cfg = mtp::load_config(config_path, environ);
+    } catch (const mtp::ConfigError& ex) {
+        mtp::log_error(ex.what());
+        return 78;
     } catch (const std::exception& ex) {
         mtp::log_error(ex.what());
         return 78;
@@ -39,6 +42,9 @@ int main(int argc, char** argv) {
         const int code = app.run();
         g_app = nullptr;
         return code;
+    } catch (const mtp::ConfigError& ex) {
+        mtp::log_error(ex.what());
+        return 78;
     } catch (const std::exception& ex) {
         mtp::log_error(ex.what());
         return 75;

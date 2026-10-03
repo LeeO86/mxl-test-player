@@ -9,6 +9,10 @@
 
 namespace mtp {
 
+// Creates the output domain once. Does not overwrite an existing domain_def.json
+// or options.json. Throws ConfigError when an existing id does not match.
+void ensure_output_domain(const std::string& domain_dir, const std::string& domain_id, std::uint64_t history_duration_ns);
+
 class MxlSession {
 public:
     MxlSession() = default;
@@ -16,8 +20,9 @@ public:
     MxlSession(const MxlSession&) = delete;
     MxlSession& operator=(const MxlSession&) = delete;
 
-    void open(const std::string& domain_dir, const std::string& domain_id);
+    void open(const std::string& domain_dir, const std::string& domain_id, std::uint64_t history_duration_ns);
     void close();
+    void remove_own_domain();
     const std::string& domain_dir() const { return domain_; }
     const std::string& domain_id() const { return domain_id_; }
     void* instance() const { return instance_; }

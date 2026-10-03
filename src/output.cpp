@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -24,6 +25,8 @@ namespace {
 namespace fs = std::filesystem;
 
 std::string hostname() {
+    const char* announced = std::getenv("NMOS_HOST_ADDRESS");
+    if (announced && *announced) return announced;
     char buf[256] = {};
     if (gethostname(buf, sizeof(buf) - 1) != 0) return "player";
     return buf;
@@ -608,6 +611,10 @@ nlohmann::json Output::status() const {
                           {"source", source_to_json(source_)},
                           {"burnin", burnin_to_json(cfg_.burnin)},
                           {"key_mode", key_mode_name(cfg_.key_mode)},
+                          {"master_video", master_v_.load()},
+                          {"master_audio", master_a_.load()},
+                          {"master_data", master_d_.load()},
+                          {"master_key", master_k_.load()},
                           {"anc", cfg_.anc},
                           {"tc_source", tc_source_name(cfg_.tc_source)},
                           {"drop_frame", cfg_.drop_frame},

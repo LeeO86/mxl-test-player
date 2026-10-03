@@ -2,6 +2,7 @@
 
 #include "anc.hpp"
 #include "http_server.hpp"
+#include "process.hpp"
 #include "nmos.hpp"
 #include "output.hpp"
 #include "util.hpp"
@@ -112,8 +113,10 @@ struct App::Impl {
     std::map<std::string, Upload> uploads;
     std::mutex mu;
     std::atomic<bool> stop{false};
+    std::atomic<bool> shut{false};
     std::atomic<int> code{0};
     std::thread meter_thread;
+    void shutdown_now();
 
     explicit Impl(Config c)
         : cfg(std::move(c)), library(cfg) {}
@@ -143,7 +146,11 @@ void App::Impl::save_state() {
                            {"format", st["format"]},
                            {"key_mode", st["key_mode"]},
                            {"anc", st["anc"]},
-                           {"tc_source", st["tc_source"]}});
+                           {"tc_source", st["tc_source"]},
+                           {"master_video", st.value("master_video", true)},
+                           {"master_audio", st.value("master_audio", true)},
+                           {"master_data", st.value("master_data", true)},
+                           {"master_key", st.value("master_key", true)}});
     }
     std::error_code ec;
     fs::create_directories(fs::path(cfg.state_path).parent_path(), ec);
@@ -169,6 +176,11 @@ void App::Impl::load_state() {
         if (o.contains("burnin")) outputs[i]->set_burnin(burnin_from_json(o["burnin"]));
         if (o.contains("source")) outputs[i]->set_source(source_from_json(o["source"]));
         if (o.contains("transport")) outputs[i]->command(o["transport"].get<std::string>() == "pause" ? "pause" : o["transport"].get<std::string>() == "stop" ? "stop" : "play");
+        const auto ids = outputs[i]->ids();
+        if (o.contains("master_video")) outputs[i]->set_master(ids.video_sender.str(), o.at("master_video").get<bool>());
+        if (o.contains("master_audio")) outputs[i]->set_master(ids.audio_sender.str(), o.at("master_audio").get<bool>());
+        if (o.contains("master_data")) outputs[i]->set_master(ids.data_sender.str(), o.at("master_data").get<bool>());
+        if (o.contains("master_key")) outputs[i]->set_master(ids.key_sender.str(), o.at("master_key").get<bool>());
         ++i;
     }
 }
@@ -177,11 +189,10 @@ void App::Impl::refresh_nmos() {
     NmosModel m;
     m.node_id = node.str();
     m.device_id = uuid_v5(node, "device").str();
-    m.label = "MXL Test Player";
-    char host[256] = {};
-    gethostname(host, sizeof(host) - 1);
-    m.host = host[0] ? host : "localhost";
+    m.label = cfg.nmos_label;
+    m.host = cfg.nmos_host_address;
     m.api_port = cfg.nmos_port;
+    m.tags = cfg.nmos_tags;
     m.domain_id = domain_id;
     for (const auto& o : outputs) {
         const auto st = o->status();
@@ -288,6 +299,11 @@ void App::Impl::handle(const HttpRequest& req, HttpResponse& res) {
         return;
     }
     if (path == "/readyz") {
+        if (nmos.registry_configured() && !nmos.registered()) {
+            res.status = 503;
+            res.set_text("not registered\n", "text/plain");
+            return;
+        }
         res.set_text("ok\n", "text/plain");
         return;
     }
@@ -345,6 +361,54 @@ void App::Impl::handle(const HttpRequest& req, HttpResponse& res) {
         return json::parse(std::string(req.body.begin(), req.body.end()));
     };
     try {
+        if (path == "/api/v1/config/export" && req.method == "GET") {
+            text(json{{"version", 1},
+                      {"note", "No secrets are stored. Deployment settings (ports, registry, seed) are informational and are not applied by import."},
+                      {"deployment",
+                       json{{"format", cfg.format.name},
+                            {"audio_channels", cfg.audio_channels},
+                            {"outputs_count", cfg.outputs},
+                            {"nmos_label", cfg.nmos_label},
+                            {"nmos_seed", cfg.nmos_seed},
+                            {"nmos_host_address", cfg.nmos_host_address}}},
+                      {"state", json{{"outputs", [&] {
+                                          json arr = json::array();
+                                          for (const auto& o : outputs) {
+                                              auto st = o->status();
+                                              arr.push_back(json{{"source", st["source"]},
+                                                                  {"transport", st["transport"]},
+                                                                  {"loop", st["loop"]},
+                                                                  {"burnin", st["burnin"]},
+                                                                  {"label", st["label"]},
+                                                                  {"format", st["format"]},
+                                                                  {"key_mode", st["key_mode"]},
+                                                                  {"anc", st["anc"]},
+                                                                  {"tc_source", st["tc_source"]},
+                                                                  {"master_video", st["master_video"]},
+                                                                  {"master_audio", st["master_audio"]},
+                                                                  {"master_data", st["master_data"]},
+                                                                  {"master_key", st["master_key"]}});
+                                          }
+                                          return arr;
+                                      }()},
+                                      {"presets", presets},
+                                      {"playlists", playlists}}}});
+            return;
+        }
+        if (path == "/api/v1/config/import" && req.method == "POST") {
+            auto doc = body_json();
+            json state = doc.contains("state") ? doc.at("state") : doc;
+            {
+                std::ofstream f(cfg.state_path);
+                f << state.dump(2);
+            }
+            if (state.contains("presets")) presets = state.at("presets").get<std::vector<json>>();
+            if (state.contains("playlists")) playlists = state.at("playlists").get<std::vector<json>>();
+            load_state();
+            save_state();
+            text(json{{"ok", true}});
+            return;
+        }
         if (path == "/api/v1/config" && req.method == "GET") {
             text(json{{"format", cfg.format.name},
                       {"outputs", cfg.outputs},
@@ -592,6 +656,8 @@ void App::Impl::handle(const HttpRequest& req, HttpResponse& res) {
                 uploads.erase(it);
                 lock.unlock();
                 auto item = library.ingest_file(assembled.string(), name, opts, cfg.format);
+                std::error_code ec;
+                fs::remove_all(fs::path(cfg.library_dir) / "_uploads" / id, ec);
                 text(library.to_json(item), 201);
                 return;
             }
@@ -702,7 +768,7 @@ App::App(Config cfg) : impl_(new Impl(std::move(cfg))) {
         else impl_->cfg.font_dir = "assets/fonts";
     }
     impl_->web_root = find_web_root(impl_->cfg);
-    impl_->mxl.open(impl_->cfg.mxl_domain_dir, impl_->domain_id);
+    impl_->mxl.open(impl_->cfg.mxl_domain_dir, impl_->domain_id, impl_->cfg.history_duration_ns);
     for (int i = 0; i < impl_->cfg.outputs; ++i) {
         auto o = std::make_unique<Output>(i, impl_->cfg.output_configs[static_cast<std::size_t>(i)], impl_->cfg.format, impl_->mxl, impl_->library,
                                           impl_->node, impl_->cfg.font_dir, impl_->cfg.ram_clip_max_s,
@@ -718,7 +784,8 @@ App::App(Config cfg) : impl_(new Impl(std::move(cfg))) {
         for (auto& o : impl_->outputs) o->set_master(id, en);
     };
     impl_->refresh_nmos();
-    impl_->nmos.start(impl_->cfg.nmos_registry_address, impl_->cfg.nmos_registry_port);
+    impl_->nmos.start(impl_->cfg.nmos_registry_address, impl_->cfg.nmos_registry_port, impl_->cfg.nmos_query_address,
+                      impl_->cfg.nmos_query_port);
     impl_->nmos_http.start(impl_->cfg.nmos_port, [this](const HttpRequest& rq, HttpResponse& rs) { impl_->nmos.handle(rq, rs); });
     impl_->web.start(impl_->cfg.web_port, [this](const HttpRequest& rq, HttpResponse& rs) { impl_->handle(rq, rs); });
     impl_->meter_thread = std::thread([this] {
@@ -738,22 +805,38 @@ App::App(Config cfg) : impl_(new Impl(std::move(cfg))) {
     log_info("web :" + std::to_string(impl_->cfg.web_port) + " nmos :" + std::to_string(impl_->cfg.nmos_port));
 }
 
+void App::Impl::shutdown_now() {
+    if (shut.exchange(true)) return;
+    const int timeout_s = std::max(1, cfg.shutdown_timeout_s);
+    std::thread([timeout_s] {
+        std::this_thread::sleep_for(std::chrono::seconds(timeout_s));
+        _exit(143);
+    }).detach();
+    stop = true;
+    stop_children();
+    if (meter_thread.joinable()) meter_thread.join();
+    web.stop();
+    nmos_http.stop();
+    library.stop();
+    library.purge_uploads();
+    for (auto& o : outputs) o->join();
+    save_state();
+    nmos.deregister();
+    const bool cleanup = cfg.mxl_cleanup_on_exit;
+    mxl.close();
+    if (cleanup) mxl.remove_own_domain();
+}
+
 App::~App() {
     if (!impl_) return;
-    impl_->stop = true;
-    if (impl_->meter_thread.joinable()) impl_->meter_thread.join();
-    impl_->web.stop();
-    impl_->nmos_http.stop();
-    impl_->nmos.stop();
-    impl_->library.stop();
-    for (auto& o : impl_->outputs) o->join();
-    impl_->save_state();
+    impl_->shutdown_now();
     delete impl_;
     impl_ = nullptr;
 }
 
 int App::run() {
     while (!impl_->stop) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    impl_->shutdown_now();
     return impl_->code;
 }
 

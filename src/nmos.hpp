@@ -3,6 +3,9 @@
 #include "http_server.hpp"
 #include "ids.hpp"
 
+#include <nlohmann/json.hpp>
+
+#include <atomic>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -31,6 +34,7 @@ struct NmosModel {
     std::string host;
     int api_port = 3282;
     std::string domain_id;
+    nlohmann::json tags = nlohmann::json::object();
     std::vector<NmosSenderState> senders;
     std::vector<std::string> source_ids;
     std::vector<std::string> source_labels;
@@ -46,8 +50,11 @@ struct NmosModel {
 class NmosNode {
 public:
     void update(NmosModel model);
-    void start(const std::string& registry_host, int registry_port);
+    void start(const std::string& registry_host, int registry_port, const std::string& query_host, int query_port);
     void stop();
+    void deregister();
+    bool registered() const { return registered_.load(); }
+    bool registry_configured() const;
     void handle(const HttpRequest& req, HttpResponse& res);
     bool master_enabled(const std::string& sender_id) const;
     std::function<void(const std::string& sender_id, bool enabled)> on_master;
@@ -62,6 +69,10 @@ private:
     bool stop_ = false;
     std::string registry_host_;
     int registry_port_ = 0;
+    std::string query_host_;
+    int query_port_ = 0;
+    std::atomic<bool> registered_{false};
+    std::atomic<bool> saw_delete_{false};
 };
 
 }  // namespace mtp

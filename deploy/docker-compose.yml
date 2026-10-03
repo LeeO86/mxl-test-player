@@ -1,6 +1,7 @@
-# Lab demo. The registry image is the common nmos-cpp example; the player
-# registers when NMOS_REGISTRY_ADDRESS is set. Multiviewer and webrtc-monitor
-# are the sibling images from the platform and are optional to start.
+# Lab demo on the pod (bridge) network. The registry image is the common
+# nmos-cpp example. Query API is registration port + 1. The player announces
+# the first non-loopback IPv4 inside the container unless NMOS_HOST_ADDRESS
+# is set to that address.
 services:
   registry:
     image: rhastie/nmos-cpp:latest
@@ -10,22 +11,33 @@ services:
       RUN_REGISTRY: "true"
     ports:
       - "3210:3210"
+      - "3211:3211"
 
   player:
     image: ghcr.io/leeo86/mxl-test-player:nightly-dev
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    network_mode: host
     user: "1000:1000"
+    ports:
+      - "8130:8130"
+      - "3282:3282"
     environment:
       PLAYER_FORMAT: "1080p50"
       PLAYER_OUTPUTS: "2"
       PLAYER_AUDIO_CHANNELS: "16"
       PLAYER_LIBRARY_DIR: /data/library
+      CONFIG_DIR: /config
+      MXL_DOMAIN_SCAN_PATH: /Volumes/mxl
       MXL_OUTPUT_DOMAIN_DIR: /Volumes/mxl/player-demo
-      NMOS_REGISTRY_ADDRESS: 127.0.0.1
+      MXL_CLEANUP_ON_EXIT: "false"
+      SHUTDOWN_TIMEOUT_S: "10"
+      NMOS_SEED: demo-player
+      NMOS_LABEL: Demo player
+      NMOS_REGISTRY_ADDRESS: registry
       NMOS_REGISTRY_PORT: "3210"
+      NMOS_QUERY_ADDRESS: registry
+      NMOS_QUERY_PORT: "3211"
       NMOS_DNS_SD: "false"
       WEB_PORT: "8130"
       NMOS_PORT: "3282"
@@ -33,12 +45,6 @@ services:
       - mxl:/Volumes/mxl
       - library:/data/library
       - config:/config
-
-  # Optional viewers. Uncomment when those images are available locally.
-  # multiviewer:
-  #   image: ghcr.io/leeo86/mxl-multiviewer:latest
-  # webrtc-monitor:
-  #   image: ghcr.io/leeo86/mxl-webrtc-monitor:latest
 
 volumes:
   mxl:

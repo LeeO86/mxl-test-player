@@ -24,4 +24,6 @@ jobs:
       - name: unit
         run: ./build/player_tests
       - name: integration
-        run: python3 tests/integration/play_loop.py
+        run: |
+          python3 tests/integration/lifecycle.py
+          python3 tests/integration/play_loop.py
