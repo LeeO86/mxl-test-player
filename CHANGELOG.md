@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- NMOS registration sends complete IS-04 v1.3 resources (node `description` and `interfaces`, device `description`, source `caps` and audio `channels`, the flow's `flow_def.json`, sender `tags`). nmos-cpp rejected the previous bodies, so `/readyz` never turned 200 against it. Registry and Node API now use the same builders.
+- Still test patterns are rendered once per writer thread and copied. A 1080p50 output took about 53 ms per grain and ran at about 19 fps; four outputs now keep 50 fps.
+- The writer no longer fills and copies a key frame when keying is off and writes progressive grains without an extra copy.
+- The process raises its open-file soft limit to the hard limit at start. Each MXL flow keeps a descriptor per grain; with Docker's default of 1024, 16 outputs failed to open their flows and the process crashed.
+
 ## 1.0.0
 
 Stable platform contract. A later breaking change of these settings, APIs or
