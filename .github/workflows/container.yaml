@@ -44,7 +44,7 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
             type=raw,value=nightly-dev,enable=${{ !startsWith(github.ref, 'refs/tags/') }}
-            type=sha,prefix=git-,format=short
+            type=sha,prefix=git-,format=short,enable=${{ !startsWith(github.ref, 'refs/tags/') }}
           flavor: |
             latest=false
           labels: |
