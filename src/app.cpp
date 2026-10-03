@@ -199,7 +199,8 @@ void App::Impl::refresh_nmos() {
         json flows = json::object();
         for (const auto& def : o->flow_definitions()) {
             auto f = json::parse(def);
-            flows[f.at("id").get<std::string>()] = std::move(f);
+            const auto id = f.at("id").get<std::string>();
+            flows[id] = std::move(f);
         }
         const auto ids = o->ids();
         auto push = [&](const Uuid& sender, const Uuid& flow, const Uuid& source, const char* role, const char* format) {

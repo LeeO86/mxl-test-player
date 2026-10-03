@@ -149,6 +149,44 @@ TEST_CASE("pattern checksums are stable and solids hit legal levels") {
     CHECK(fnv1a64(buf.data(), buf.size()) != m0);
 }
 
+TEST_CASE("cached still patterns match a fresh render") {
+    const VideoFormat fmt = *parse_format("720p25");
+    std::vector<std::uint8_t> buf(v210_size(fmt.width, fmt.height));
+    PatternRequest req;
+    req.format = fmt;
+    req.pattern = VideoPattern::Bars75;
+    render_pattern(req, buf.data());
+    const auto bars = fnv1a64(buf.data(), buf.size());
+    req.pluge = true;
+    render_pattern(req, buf.data());
+    const auto pluge = fnv1a64(buf.data(), buf.size());
+    CHECK(pluge != bars);
+    req.flash = true;
+    render_pattern(req, buf.data());
+    const auto flash = fnv1a64(buf.data(), buf.size());
+    CHECK(flash != pluge);
+    // Cache hits overwrite the whole grain and follow every key change.
+    std::fill(buf.begin(), buf.end(), 0xAB);
+    req.flash = false;
+    render_pattern(req, buf.data());
+    CHECK(fnv1a64(buf.data(), buf.size()) == pluge);
+    req.pluge = false;
+    render_pattern(req, buf.data());
+    CHECK(fnv1a64(buf.data(), buf.size()) == bars);
+    req.flash = true;
+    render_pattern(req, buf.data());
+    CHECK(fnv1a64(buf.data(), buf.size()) != bars);
+
+    req.flash = false;
+    req.pattern = VideoPattern::ZonePlateMoving;
+    req.frame_index = 0;
+    render_pattern(req, buf.data());
+    const auto z0 = fnv1a64(buf.data(), buf.size());
+    req.frame_index = 1;
+    render_pattern(req, buf.data());
+    CHECK(fnv1a64(buf.data(), buf.size()) != z0);
+}
+
 TEST_CASE("av sync flash lines up with beep sample index") {
     const Rational rate{50, 1};
     int flashes = 0;

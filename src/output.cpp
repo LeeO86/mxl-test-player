@@ -283,7 +283,6 @@ void Output::writer_main() {
     OverlayRenderer overlay(font_dir_);
     std::uint64_t last_index = 0;
     bool have_last = false;
-    std::vector<std::uint8_t> held;
     MezzanineReader reader;
     std::string reader_path;
     std::int64_t last_loop_index = 0;
@@ -385,10 +384,11 @@ void Output::writer_main() {
 
         const std::size_t full_bytes = v210_size(fmt.width, fmt.height);
         std::vector<std::uint8_t> full(full_bytes);
-        std::vector<std::uint8_t> key(full_bytes);
-        std::vector<std::uint8_t> a10(alpha10_size(fmt.width, fmt.height));
+        // Key and alpha planes only exist when keying is on (each is a full-frame write per grain).
+        std::vector<std::uint8_t> key(cfg.key_mode != KeyMode::Off ? full_bytes : 0);
+        std::vector<std::uint8_t> a10(cfg.key_mode == KeyMode::V210a ? alpha10_size(fmt.width, fmt.height) : 0);
         const int key_y = cfg.idle_key == IdleKey::Transparent ? cfg.key_min : cfg.key_max;
-        fill_v210(key.data(), fmt.width, fmt.height, key_y, kCMid, kCMid);
+        if (!key.empty()) fill_v210(key.data(), fmt.width, fmt.height, key_y, kCMid, kCMid);
         bool keyed_still = false;
         std::string item_name;
         if (idle || src.type == "pattern" || !media->ready) {
@@ -485,17 +485,19 @@ void Output::writer_main() {
         }
         overlay.apply(full.data(), (cfg.key_mode != KeyMode::Off) ? key.data() : nullptr, of);
 
-        std::vector<std::uint8_t> grain;
-        std::vector<std::uint8_t> key_grain;
+        // An interlaced grain is one field; a progressive grain is the frame itself (no copy).
+        std::vector<std::uint8_t> field_grain;
+        std::vector<std::uint8_t> field_key;
         if (inter) {
-            grain.resize(v210_size(fmt.width, fmt.field_height()));
-            key_grain.resize(grain.size());
-            extract_v210_field(full.data(), fmt.width, fmt.height, field, grain.data());
-            extract_v210_field(key.data(), fmt.width, fmt.height, field, key_grain.data());
-        } else {
-            grain = full;
-            key_grain = key;
+            field_grain.resize(v210_size(fmt.width, fmt.field_height()));
+            extract_v210_field(full.data(), fmt.width, fmt.height, field, field_grain.data());
+            if (!key.empty()) {
+                field_key.resize(field_grain.size());
+                extract_v210_field(key.data(), fmt.width, fmt.height, field, field_key.data());
+            }
         }
+        const std::vector<std::uint8_t>& grain = inter ? field_grain : full;
+        const std::vector<std::uint8_t>& key_grain = inter ? field_key : key;
         const bool write_v = master_v_.load();
         const bool write_a = master_a_.load();
         const bool write_d = master_d_.load() && cfg.anc;
@@ -568,7 +570,6 @@ void Output::writer_main() {
         grains_++;
         last_index = idx;
         have_last = true;
-        held = grain;
         if ((idx % 5) == 0) {
             std::lock_guard lock(thumb_mu_);
             // Keep a small JPEG of the full frame.
@@ -592,7 +593,6 @@ void Output::writer_main() {
                 meters_[static_cast<std::size_t>(c)] = peak;
             }
         }
-        (void)held;
     }
     if (flows_open_) {
         video_.close(mxl_);

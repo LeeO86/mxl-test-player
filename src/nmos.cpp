@@ -58,15 +58,6 @@ int http_status(const std::string& response) {
     return std::atoi(response.c_str() + sp + 1);
 }
 
-std::string json_escape(const std::string& s) {
-    std::string o;
-    for (char c : s) {
-        if (c == '"' || c == '\\') o.push_back('\\');
-        o.push_back(c);
-    }
-    return o;
-}
-
 std::string base_href(const NmosModel& m) { return "http://" + m.host + ":" + std::to_string(m.api_port); }
 
 }  // namespace
