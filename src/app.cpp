@@ -196,23 +196,14 @@ void App::Impl::refresh_nmos() {
     m.domain_id = domain_id;
     for (const auto& o : outputs) {
         const auto st = o->status();
-        auto add = [&](const char* idk, const char* flowk, const char* fmt, const char* media, const char* role) {
-            NmosSenderState s;
-            s.id = st.value(idk, "");
-            s.flow_id = st.value(flowk, "");
-            s.source_id = uuid_v5(node, "output/" + std::to_string(o->index()) + "/source/" + std::string(role)).str();
-            // Use the ids embedded in the flow derivation instead of recomputing a mismatched source.
-            s.label = st.value("label", "") + std::string(" ") + role;
-            s.description = s.label;
-            s.format = fmt;
-            s.media_type = media;
-            s.group = st.value("label", "Out") + std::string(":") + role;
-            s.master_enable = true;
-            s.index = o->index();
-            if (!s.id.empty() && !s.flow_id.empty()) m.senders.push_back(s);
-        };
+        json flows = json::object();
+        for (const auto& def : o->flow_definitions()) {
+            auto f = json::parse(def);
+            const auto id = f.at("id").get<std::string>();
+            flows[id] = std::move(f);
+        }
         const auto ids = o->ids();
-        auto push = [&](const Uuid& sender, const Uuid& flow, const Uuid& source, const char* role, const char* format, const char* media) {
+        auto push = [&](const Uuid& sender, const Uuid& flow, const Uuid& source, const char* role, const char* format) {
             NmosSenderState s;
             s.id = sender.str();
             s.flow_id = flow.str();
@@ -220,21 +211,14 @@ void App::Impl::refresh_nmos() {
             s.label = st.value("label", "") + std::string(" ") + role;
             s.description = s.label;
             s.format = format;
-            s.media_type = media;
-            s.group = st.value("label", "Out");
-            for (char& c : s.group)
-                if (c == ':') c = ' ';
-            s.group += std::string(":") + role;
+            s.flow = flows.value(s.flow_id, json::object());
             s.index = o->index();
             m.senders.push_back(std::move(s));
         };
-        push(ids.video_sender, ids.video_flow, ids.video_source, "Video", "urn:x-nmos:format:video",
-             st.value("key_mode", "off") == "v210a" ? "video/v210a" : "video/v210");
-        push(ids.audio_sender, ids.audio_flow, ids.audio_source, "Audio", "urn:x-nmos:format:audio", "audio/float32");
-        if (st.value("anc", true)) push(ids.data_sender, ids.data_flow, ids.data_source, "Data", "urn:x-nmos:format:data", "video/smpte291");
-        if (st.value("key_mode", "off") == "fill_key")
-            push(ids.key_sender, ids.key_flow, ids.key_source, "Key", "urn:x-nmos:format:video", "video/v210");
-        (void)add;
+        push(ids.video_sender, ids.video_flow, ids.video_source, "Video", "urn:x-nmos:format:video");
+        push(ids.audio_sender, ids.audio_flow, ids.audio_source, "Audio", "urn:x-nmos:format:audio");
+        if (st.value("anc", true)) push(ids.data_sender, ids.data_flow, ids.data_source, "Data", "urn:x-nmos:format:data");
+        if (st.value("key_mode", "off") == "fill_key") push(ids.key_sender, ids.key_flow, ids.key_source, "Key", "urn:x-nmos:format:video");
     }
     nmos.update(m);
 }
