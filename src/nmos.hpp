@@ -21,8 +21,7 @@ struct NmosSenderState {
     std::string label;
     std::string description;
     std::string format;  // urn:x-nmos:format:...
-    std::string media_type;
-    std::string group;
+    nlohmann::json flow;  // the flow's flow_def.json, registered as the IS-04 flow
     bool master_enable = true;
     int index = 0;
 };
@@ -46,6 +45,13 @@ struct NmosModel {
     std::vector<std::string> flow_media;
     std::vector<std::string> flow_json;  // full flow resource body pieces built by the node
 };
+
+// IS-04 v1.3 resources. The registry and the Node API serve the same bodies.
+nlohmann::json nmos_node_json(const NmosModel& m, const std::string& version);
+nlohmann::json nmos_device_json(const NmosModel& m, const std::string& version);
+nlohmann::json nmos_source_json(const NmosModel& m, const NmosSenderState& s, const std::string& version);
+nlohmann::json nmos_flow_json(const NmosModel& m, const NmosSenderState& s, const std::string& version);
+nlohmann::json nmos_sender_json(const NmosModel& m, const NmosSenderState& s, const std::string& version);
 
 class NmosNode {
 public:

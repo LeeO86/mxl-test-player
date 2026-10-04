@@ -58,16 +58,78 @@ int http_status(const std::string& response) {
     return std::atoi(response.c_str() + sp + 1);
 }
 
-std::string json_escape(const std::string& s) {
-    std::string o;
-    for (char c : s) {
-        if (c == '"' || c == '\\') o.push_back('\\');
-        o.push_back(c);
-    }
-    return o;
-}
+std::string base_href(const NmosModel& m) { return "http://" + m.host + ":" + std::to_string(m.api_port); }
 
 }  // namespace
+
+nlohmann::json nmos_node_json(const NmosModel& m, const std::string& version) {
+    return {{"id", m.node_id},
+            {"version", version},
+            {"label", m.label},
+            {"description", "MXL test and demo source"},
+            {"tags", m.tags},
+            {"href", base_href(m) + "/x-nmos/node/v1.3/self"},
+            {"hostname", m.host},
+            {"api", {{"versions", {"v1.3"}}, {"endpoints", {{{"host", m.host}, {"port", m.api_port}, {"protocol", "http"}}}}}},
+            {"caps", nlohmann::json::object()},
+            {"services", nlohmann::json::array()},
+            {"clocks", {{{"name", "clk0"}, {"ref_type", "internal"}}}},
+            {"interfaces", nlohmann::json::array()}};
+}
+
+nlohmann::json nmos_device_json(const NmosModel& m, const std::string& version) {
+    return {{"id", m.device_id},
+            {"version", version},
+            {"label", m.label},
+            {"description", "MXL Test Player"},
+            {"tags", m.tags},
+            {"type", "urn:x-nmos:device:generic"},
+            {"node_id", m.node_id},
+            {"senders", nlohmann::json::array()},
+            {"receivers", nlohmann::json::array()},
+            {"controls", {{{"href", base_href(m) + "/x-nmos/connection/v1.1/"}, {"type", "urn:x-nmos:control:sr-ctrl/v1.1"}}}}};
+}
+
+nlohmann::json nmos_source_json(const NmosModel& m, const NmosSenderState& s, const std::string& version) {
+    nlohmann::json j{{"id", s.source_id},
+                     {"version", version},
+                     {"label", s.label},
+                     {"description", s.description},
+                     {"tags", nlohmann::json::object()},
+                     {"format", s.format},
+                     {"caps", nlohmann::json::object()},
+                     {"device_id", m.device_id},
+                     {"parents", nlohmann::json::array()},
+                     {"clock_name", "clk0"}};
+    // Audio sources must list their channels (source_audio.json).
+    if (s.format == "urn:x-nmos:format:audio") {
+        auto channels = nlohmann::json::array();
+        for (int c = 1; c <= s.flow.value("channel_count", 0); ++c) channels.push_back({{"label", "Channel " + std::to_string(c)}});
+        j["channels"] = channels;
+    }
+    return j;
+}
+
+nlohmann::json nmos_flow_json(const NmosModel& m, const NmosSenderState& s, const std::string& version) {
+    nlohmann::json j = s.flow;
+    j["version"] = version;
+    j["device_id"] = m.device_id;
+    return j;
+}
+
+nlohmann::json nmos_sender_json(const NmosModel& m, const NmosSenderState& s, const std::string& version) {
+    return {{"id", s.id},
+            {"version", version},
+            {"label", s.label},
+            {"description", s.description},
+            {"tags", nlohmann::json::object()},
+            {"flow_id", s.flow_id},
+            {"transport", "urn:x-nmos:transport:mxl"},
+            {"device_id", m.device_id},
+            {"manifest_href", nullptr},
+            {"interface_bindings", nlohmann::json::array()},
+            {"subscription", {{"receiver_id", nullptr}, {"active", s.master_enable}}}};
+}
 
 std::string NmosNode::version() const {
     const auto now = std::chrono::system_clock::now().time_since_epoch();
@@ -130,37 +192,16 @@ void NmosNode::registry_loop(std::string host, int port) {
         }
         if (!m.node_id.empty()) {
             const auto v = version();
-            auto post = [&](const std::string& type, const std::string& data) {
+            auto post = [&](const std::string& type, const nlohmann::json& data) {
                 return http_exchange(host, port, "POST", "/x-nmos/registration/v1.3/resource",
-                                     std::string("{\"type\":\"") + type + "\",\"data\":" + data + "}");
+                                     nlohmann::json{{"type", type}, {"data", data}}.dump());
             };
-            const std::string tags = m.tags.dump();
-            const std::string href = "http://" + m.host + ":" + std::to_string(m.api_port);
-            const std::string control = href + "/x-nmos/connection/v1.1/";
-            const auto node_resp = post(
-                "node", "{\"id\":\"" + m.node_id + "\",\"version\":\"" + v + "\",\"label\":\"" + json_escape(m.label) + "\",\"href\":\"" + href +
-                            "/x-nmos/node/v1.3/self\",\"hostname\":\"" + json_escape(m.host) +
-                            "\",\"api\":{\"versions\":[\"v1.3\"],\"endpoints\":[{\"host\":\"" + json_escape(m.host) + "\",\"port\":" +
-                            std::to_string(m.api_port) + ",\"protocol\":\"http\"}]},\"caps\":{},\"services\":[],\"clocks\":[{\"name\":\"clk0\",\"ref_type\":\"internal\"}],\"tags\":" +
-                            tags + "}");
-            post("device", "{\"id\":\"" + m.device_id + "\",\"version\":\"" + v + "\",\"label\":\"" + json_escape(m.label) +
-                               "\",\"type\":\"urn:x-nmos:device:generic\",\"node_id\":\"" + m.node_id +
-                               "\",\"senders\":[],\"receivers\":[],\"controls\":[{\"href\":\"" + control +
-                               "\",\"type\":\"urn:x-nmos:control:sr-ctrl/v1.1\"}],\"tags\":" + tags + "}");
-            for (std::size_t i = 0; i < m.senders.size(); ++i) {
-                const auto& s = m.senders[i];
-                post("source", "{\"id\":\"" + s.source_id + "\",\"version\":\"" + v + "\",\"label\":\"" + json_escape(s.label) +
-                                   "\",\"description\":\"" + json_escape(s.description) + "\",\"format\":\"" + s.format + "\",\"device_id\":\"" +
-                                   m.device_id + "\",\"parents\":[],\"clock_name\":\"clk0\",\"tags\":{}}");
-                post("flow", "{\"id\":\"" + s.flow_id + "\",\"version\":\"" + v + "\",\"label\":\"" + json_escape(s.label) +
-                                 "\",\"description\":\"" + json_escape(s.description) + "\",\"format\":\"" + s.format + "\",\"media_type\":\"" +
-                                 s.media_type + "\",\"source_id\":\"" + s.source_id + "\",\"device_id\":\"" + m.device_id +
-                                 "\",\"parents\":[],\"tags\":{\"urn:x-nmos:tag:grouphint/v1.0\":[\"" + json_escape(s.group) + "\"]}}");
-                post("sender", "{\"id\":\"" + s.id + "\",\"version\":\"" + v + "\",\"label\":\"" + json_escape(s.label) +
-                                   "\",\"description\":\"" + json_escape(s.description) + "\",\"flow_id\":\"" + s.flow_id + "\",\"transport\":\"" +
-                                   "urn:x-nmos:transport:mxl\",\"device_id\":\"" + m.device_id +
-                                   "\",\"manifest_href\":null,\"interface_bindings\":[],\"subscription\":{\"receiver_id\":null,\"active\":" +
-                                   std::string(s.master_enable ? "true" : "false") + "}}");
+            const auto node_resp = post("node", nmos_node_json(m, v));
+            post("device", nmos_device_json(m, v));
+            for (const auto& s : m.senders) {
+                post("source", nmos_source_json(m, s, v));
+                post("flow", nmos_flow_json(m, s, v));
+                post("sender", nmos_sender_json(m, s, v));
             }
             const auto health = http_exchange(host, port, "POST", "/x-nmos/registration/v1.3/health/nodes/" + m.node_id, "");
             const int posted = http_status(node_resp);
@@ -217,36 +258,21 @@ void NmosNode::handle(const HttpRequest& req, HttpResponse& res) {
     }
     const std::string v = version();
     if (path == "/x-nmos/node/v1.3/self" || path == "/x-nmos/node/v1.3/self/") {
-        text("{\"id\":\"" + m.node_id + "\",\"version\":\"" + v + "\",\"label\":\"" + json_escape(m.label) + "\",\"description\":\"MXL test and demo source\",\"hostname\":\"" +
-             json_escape(m.host) + "\",\"href\":\"" + base +
-             "/x-nmos/node/v1.3/self\",\"api\":{\"versions\":[\"v1.3\"],\"endpoints\":[{\"host\":\"" + json_escape(m.host) + "\",\"port\":" +
-             std::to_string(m.api_port) + ",\"protocol\":\"http\"}]},\"caps\":{},\"services\":[],\"clocks\":[{\"name\":\"clk0\",\"ref_type\":\"internal\"}],\"tags\":" +
-             m.tags.dump() + "}");
+        text(nmos_node_json(m, v).dump());
         return;
     }
     if (path == "/x-nmos/node/v1.3/devices" || path == "/x-nmos/node/v1.3/devices/") {
-        text("[{\"id\":\"" + m.device_id + "\",\"version\":\"" + v + "\",\"label\":\"" + json_escape(m.label) +
-             "\",\"description\":\"MXL Test Player\",\"type\":\"urn:x-nmos:device:generic\",\"node_id\":\"" + m.node_id +
-             "\",\"senders\":[],\"receivers\":[],\"controls\":[{\"href\":\"" + base +
-             "/x-nmos/connection/v1.1/\",\"type\":\"urn:x-nmos:control:sr-ctrl/v1.1\"}],\"tags\":" + m.tags.dump() + "}]");
+        text(nlohmann::json::array({nmos_device_json(m, v)}).dump());
         return;
     }
-    auto list_senders = [&]() {
-        std::string s = "[";
-        for (std::size_t i = 0; i < m.senders.size(); ++i) {
-            const auto& sd = m.senders[i];
-            if (i) s += ",";
-            s += "{\"id\":\"" + sd.id + "\",\"version\":\"" + v + "\",\"label\":\"" + json_escape(sd.label) + "\",\"description\":\"" +
-                 json_escape(sd.description) + "\",\"flow_id\":\"" + sd.flow_id + "\",\"transport\":\"urn:x-nmos:transport:mxl\",\"device_id\":\"" +
-                 m.device_id + "\",\"manifest_href\":null,\"interface_bindings\":[],\"subscription\":{\"receiver_id\":null,\"active\":" +
-                 (sd.master_enable ? "true" : "false") + "},\"tags\":{}}";
-        }
-        s += "]";
-        return s;
+    auto list = [&](auto build) {
+        auto a = nlohmann::json::array();
+        for (const auto& sd : m.senders) a.push_back(build(m, sd, v));
+        return a.dump();
     };
     if (path == "/x-nmos/node/v1.3/senders" || path == "/x-nmos/node/v1.3/senders/" || path == "/x-nmos/connection/v1.1/single/senders" ||
         path == "/x-nmos/connection/v1.1/single/senders/") {
-        text(list_senders());
+        text(list(nmos_sender_json));
         return;
     }
     if (path == "/x-nmos/node/v1.3/receivers" || path == "/x-nmos/node/v1.3/receivers/" || path == "/x-nmos/connection/v1.1/single/receivers" ||
@@ -255,30 +281,11 @@ void NmosNode::handle(const HttpRequest& req, HttpResponse& res) {
         return;
     }
     if (path == "/x-nmos/node/v1.3/sources" || path == "/x-nmos/node/v1.3/sources/") {
-        std::string s = "[";
-        for (std::size_t i = 0; i < m.senders.size(); ++i) {
-            if (i) s += ",";
-            const auto& sd = m.senders[i];
-            s += "{\"id\":\"" + sd.source_id + "\",\"version\":\"" + v + "\",\"label\":\"" + json_escape(sd.label) + "\",\"description\":\"" +
-                 json_escape(sd.description) + "\",\"format\":\"" + sd.format + "\",\"caps\":{},\"device_id\":\"" + m.device_id +
-                 "\",\"parents\":[],\"clock_name\":\"clk0\",\"tags\":{}}";
-        }
-        s += "]";
-        text(s);
+        text(list(nmos_source_json));
         return;
     }
     if (path == "/x-nmos/node/v1.3/flows" || path == "/x-nmos/node/v1.3/flows/") {
-        std::string s = "[";
-        for (std::size_t i = 0; i < m.senders.size(); ++i) {
-            if (i) s += ",";
-            const auto& sd = m.senders[i];
-            s += "{\"id\":\"" + sd.flow_id + "\",\"version\":\"" + v + "\",\"label\":\"" + json_escape(sd.label) + "\",\"description\":\"" +
-                 json_escape(sd.description) + "\",\"format\":\"" + sd.format + "\",\"media_type\":\"" + sd.media_type + "\",\"source_id\":\"" +
-                 sd.source_id + "\",\"device_id\":\"" + m.device_id + "\",\"parents\":[],\"tags\":{\"urn:x-nmos:tag:grouphint/v1.0\":[\"" +
-                 json_escape(sd.group) + "\"]}}";
-        }
-        s += "]";
-        text(s);
+        text(list(nmos_flow_json));
         return;
     }
     const std::string pfx = "/x-nmos/connection/v1.1/single/senders/";

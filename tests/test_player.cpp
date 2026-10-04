@@ -5,6 +5,7 @@
 #include "format.hpp"
 #include "ids.hpp"
 #include "motion.hpp"
+#include "nmos.hpp"
 #include "mxl_io.hpp"
 #include "pattern.hpp"
 #include "placeholders.hpp"
@@ -100,6 +101,56 @@ TEST_CASE("loop conforming matches video frames times cadence") {
     CHECK(dst[(100) * 2] == doctest::Approx(0.f));
 }
 
+namespace {
+// The whole-line composite before 1.0.1, as the reference.
+void composite_whole_line(std::uint8_t* v210, int width, int height, int x0, int y0, int bw, int bh, const std::uint8_t* rgba,
+                          double opacity) {
+    const std::uint32_t stride = v210_line_stride(width);
+    std::vector<std::uint16_t> y(static_cast<std::size_t>(width)), cb(static_cast<std::size_t>(width / 2)), cr(static_cast<std::size_t>(width / 2));
+    for (int row = 0; row < bh; ++row) {
+        const int dy = y0 + row;
+        if (dy < 0 || dy >= height) continue;
+        std::uint8_t* line = v210 + static_cast<std::size_t>(dy) * stride;
+        unpack_v210_line(line, width, y.data(), cb.data(), cr.data());
+        bool dirty = false;
+        for (int col = 0; col < bw; ++col) {
+            const int dx = x0 + col;
+            if (dx < 0 || dx >= width) continue;
+            const std::uint8_t* p = rgba + (static_cast<std::size_t>(row) * static_cast<std::size_t>(bw) + col) * 4u;
+            const double a = (p[3] / 255.0) * opacity;
+            if (a <= 0.001) continue;
+            const Yuv10 over = rgb_to_yuv709(p[0] / 255.0, p[1] / 255.0, p[2] / 255.0);
+            const int c = dx / 2;
+            y[dx] = static_cast<std::uint16_t>(y[dx] * (1.0 - a) + over.y * a + 0.5);
+            cb[c] = static_cast<std::uint16_t>(cb[c] * (1.0 - a) + over.cb * a + 0.5);
+            cr[c] = static_cast<std::uint16_t>(cr[c] * (1.0 - a) + over.cr * a + 0.5);
+            dirty = true;
+        }
+        if (dirty) pack_v210_line(y.data(), cb.data(), cr.data(), width, line);
+    }
+}
+}  // namespace
+
+TEST_CASE("burn-in composite touches only the groups under the box, same pixels as the whole-line version") {
+    std::uint32_t seed = 9;
+    auto rnd = [&]() { seed = seed * 1664525u + 1013904223u; return seed >> 8; };
+    for (int width : {1920, 3840}) {
+        const int height = 40;
+        std::vector<std::uint8_t> frame(v210_size(width, height));
+        fill_v210_rgb(frame.data(), width, height, 0.2, 0.5, 0.7);
+        struct Box { int x, y, w, h; double opacity; };
+        for (Box box : {Box{100, 3, 301, 20, 1.0}, Box{-17, -5, 90, 30, 0.6}, Box{width - 50, 30, 120, 25, 0.9}, Box{7, 0, 5, 40, 1.0}}) {
+            std::vector<std::uint8_t> rgba(static_cast<std::size_t>(box.w) * box.h * 4);
+            for (auto& v : rgba) v = static_cast<std::uint8_t>(rnd());
+            auto expected = frame;
+            auto actual = frame;
+            composite_whole_line(expected.data(), width, height, box.x, box.y, box.w, box.h, rgba.data(), box.opacity);
+            composite_rgba_onto_v210(actual.data(), width, height, box.x, box.y, box.w, box.h, rgba.data(), box.opacity);
+            CHECK(expected == actual);
+        }
+    }
+}
+
 TEST_CASE("v210 pack roundtrip and legal black") {
     const int w = 48, h = 2;
     std::vector<std::uint8_t> buf(v210_size(w, h));
@@ -146,6 +197,44 @@ TEST_CASE("pattern checksums are stable and solids hit legal levels") {
     req.frame_index = 3;
     render_pattern(req, buf.data());
     CHECK(fnv1a64(buf.data(), buf.size()) != m0);
+}
+
+TEST_CASE("cached still patterns match a fresh render") {
+    const VideoFormat fmt = *parse_format("720p25");
+    std::vector<std::uint8_t> buf(v210_size(fmt.width, fmt.height));
+    PatternRequest req;
+    req.format = fmt;
+    req.pattern = VideoPattern::Bars75;
+    render_pattern(req, buf.data());
+    const auto bars = fnv1a64(buf.data(), buf.size());
+    req.pluge = true;
+    render_pattern(req, buf.data());
+    const auto pluge = fnv1a64(buf.data(), buf.size());
+    CHECK(pluge != bars);
+    req.flash = true;
+    render_pattern(req, buf.data());
+    const auto flash = fnv1a64(buf.data(), buf.size());
+    CHECK(flash != pluge);
+    // Cache hits overwrite the whole grain and follow every key change.
+    std::fill(buf.begin(), buf.end(), 0xAB);
+    req.flash = false;
+    render_pattern(req, buf.data());
+    CHECK(fnv1a64(buf.data(), buf.size()) == pluge);
+    req.pluge = false;
+    render_pattern(req, buf.data());
+    CHECK(fnv1a64(buf.data(), buf.size()) == bars);
+    req.flash = true;
+    render_pattern(req, buf.data());
+    CHECK(fnv1a64(buf.data(), buf.size()) != bars);
+
+    req.flash = false;
+    req.pattern = VideoPattern::ZonePlateMoving;
+    req.frame_index = 0;
+    render_pattern(req, buf.data());
+    const auto z0 = fnv1a64(buf.data(), buf.size());
+    req.frame_index = 1;
+    render_pattern(req, buf.data());
+    CHECK(fnv1a64(buf.data(), buf.size()) != z0);
 }
 
 TEST_CASE("av sync flash lines up with beep sample index") {
@@ -400,4 +489,53 @@ TEST_CASE("stop_children does not wait out a long job") {
     worker.join();
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
     CHECK(ms < 5000);
+}
+
+TEST_CASE("NMOS resources carry the fields IS-04 v1.3 requires") {
+    const auto node = node_id_from_seed("nmos-unit");
+    const auto ids = derive_output_ids(node, 0, *parse_format("1080p50"), 16, false);
+    const auto fmt = *parse_format("1080p50");
+    NmosModel m;
+    m.node_id = node.str();
+    m.device_id = ids.device.str();
+    m.host = "10.1.2.3";
+    auto sender = [&](const Uuid& id, const Uuid& source, const char* format, const std::string& def) {
+        NmosSenderState s;
+        s.id = id.str();
+        s.source_id = source.str();
+        s.label = s.description = "Out 1";
+        s.format = format;
+        s.flow = nlohmann::json::parse(def);
+        s.flow_id = s.flow.at("id").get<std::string>();
+        return s;
+    };
+    const auto video = sender(ids.video_sender, ids.video_source, "urn:x-nmos:format:video",
+                              video_flow_json(ids.video_flow, "Out 1", "Out 1", "Video", fmt, false, ids.video_source, ids.device));
+    const auto audio = sender(ids.audio_sender, ids.audio_source, "urn:x-nmos:format:audio",
+                              audio_flow_json(ids.audio_flow, "Out 1 audio", "Out 1", 16, ids.audio_source, ids.device));
+    const std::string v = "1:0";
+    // resource_core.json
+    auto core = [](const nlohmann::json& j) {
+        for (const char* k : {"id", "version", "label", "description", "tags"}) CHECK_MESSAGE(j.contains(k), k);
+    };
+    const auto n = nmos_node_json(m, v);
+    core(n);
+    for (const char* k : {"href", "api", "caps", "services", "clocks", "interfaces"}) CHECK_MESSAGE(n.contains(k), k);
+    const auto d = nmos_device_json(m, v);
+    core(d);
+    for (const char* k : {"type", "node_id", "senders", "receivers", "controls"}) CHECK_MESSAGE(d.contains(k), k);
+    for (const auto* s : {&video, &audio}) {
+        const auto src = nmos_source_json(m, *s, v);
+        core(src);
+        for (const char* k : {"caps", "device_id", "parents", "clock_name", "format"}) CHECK_MESSAGE(src.contains(k), k);
+        const auto snd = nmos_sender_json(m, *s, v);
+        core(snd);
+        for (const char* k : {"flow_id", "transport", "device_id", "manifest_href", "interface_bindings", "subscription"}) CHECK_MESSAGE(snd.contains(k), k);
+        core(nmos_flow_json(m, *s, v));
+    }
+    CHECK(nmos_source_json(m, audio, v).at("channels").size() == 16);
+    const auto vf = nmos_flow_json(m, video, v);
+    for (const char* k : {"frame_width", "frame_height", "colorspace", "source_id", "device_id", "parents"}) CHECK_MESSAGE(vf.contains(k), k);
+    CHECK(vf.at("version") == v);
+    CHECK(nmos_flow_json(m, audio, v).contains("sample_rate"));
 }

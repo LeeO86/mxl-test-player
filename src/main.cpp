@@ -4,6 +4,7 @@
 
 #include <csignal>
 #include <cstring>
+#include <sys/resource.h>
 #include <unistd.h>
 
 namespace {
@@ -24,6 +25,14 @@ int main(int argc, char** argv) {
         }
     }
     std::signal(SIGPIPE, SIG_IGN);
+    // Every MXL flow keeps one descriptor per grain (50 for 1 s at 50p). With
+    // Docker's default soft limit of 1024, 16 outputs ran out: flows failed to
+    // open and the font load threw.
+    rlimit files{};
+    if (getrlimit(RLIMIT_NOFILE, &files) == 0 && files.rlim_cur < files.rlim_max) {
+        files.rlim_cur = files.rlim_max;
+        setrlimit(RLIMIT_NOFILE, &files);
+    }
     mtp::Config cfg;
     try {
         cfg = mtp::load_config(config_path, environ);

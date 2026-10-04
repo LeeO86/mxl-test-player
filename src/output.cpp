@@ -130,6 +130,25 @@ OutputIds Output::ids() const {
     return ids_;
 }
 
+Output::FlowDefs Output::flow_defs(const OutputIds& ids, const OutputConfig& cfg, const VideoFormat& fmt) {
+    const std::string group = cfg.label;
+    FlowDefs d;
+    d.video = video_flow_json(ids.video_flow, cfg.label, group, "Video", fmt, cfg.key_mode == KeyMode::V210a, ids.video_source, ids.device);
+    d.audio = audio_flow_json(ids.audio_flow, cfg.label + " audio", group, cfg.audio_channels, ids.audio_source, ids.device);
+    if (cfg.anc) d.data = data_flow_json(ids.data_flow, cfg.label + " data", group, fmt, ids.data_source, ids.device);
+    if (cfg.key_mode == KeyMode::FillKey) d.key = video_flow_json(ids.key_flow, cfg.label + " key", group, "Key", fmt, false, ids.key_source, ids.device);
+    return d;
+}
+
+std::vector<std::string> Output::flow_definitions() const {
+    std::lock_guard lock(mu_);
+    const auto d = flow_defs(ids_, cfg_, fmt_);
+    std::vector<std::string> out;
+    for (const auto* s : {&d.video, &d.audio, &d.data, &d.key})
+        if (!s->empty()) out.push_back(*s);
+    return out;
+}
+
 VideoFormat Output::format() const {
     std::lock_guard lock(mu_);
     return fmt_;
@@ -248,17 +267,12 @@ void Output::reopen(const OutputConfig& cfg, const VideoFormat& fmt) {
         flows_open_ = false;
     }
     ids_ = derive_output_ids(node_, index_, fmt, cfg.audio_channels, cfg.key_mode == KeyMode::V210a);
-    const std::string group = cfg.label;
+    const auto defs = flow_defs(ids_, cfg, fmt);
     try {
-        video_.open(mxl_, video_flow_json(ids_.video_flow, cfg.label, group, "Video", fmt, cfg.key_mode == KeyMode::V210a, ids_.video_source,
-                                          ids_.device));
-        audio_.open(mxl_, audio_flow_json(ids_.audio_flow, cfg.label + " audio", group, cfg.audio_channels, ids_.audio_source, ids_.device));
-        if (cfg.anc) {
-            data_.open(mxl_, data_flow_json(ids_.data_flow, cfg.label + " data", group, fmt, ids_.data_source, ids_.device));
-        }
-        if (cfg.key_mode == KeyMode::FillKey) {
-            key_.open(mxl_, video_flow_json(ids_.key_flow, cfg.label + " key", group, "Key", fmt, false, ids_.key_source, ids_.device));
-        }
+        video_.open(mxl_, defs.video);
+        audio_.open(mxl_, defs.audio);
+        if (!defs.data.empty()) data_.open(mxl_, defs.data);
+        if (!defs.key.empty()) key_.open(mxl_, defs.key);
         flows_open_ = true;
     } catch (const std::exception& ex) {
         log_error(std::string("flow open failed: ") + ex.what());
@@ -269,10 +283,12 @@ void Output::writer_main() {
     OverlayRenderer overlay(font_dir_);
     std::uint64_t last_index = 0;
     bool have_last = false;
-    std::vector<std::uint8_t> held;
     MezzanineReader reader;
     std::string reader_path;
     std::int64_t last_loop_index = 0;
+    // Two frame buffers, reused: one may be the published thumbnail frame while
+    // the other is rendered. A new 5.5 MB buffer per grain cost a zero fill each.
+    std::shared_ptr<Frame> frames[2];
     while (!stop_) {
         OutputConfig cfg;
         SourceDesc src;
@@ -370,11 +386,22 @@ void Output::writer_main() {
         }
 
         const std::size_t full_bytes = v210_size(fmt.width, fmt.height);
-        std::vector<std::uint8_t> full(full_bytes);
-        std::vector<std::uint8_t> key(full_bytes);
-        std::vector<std::uint8_t> a10(alpha10_size(fmt.width, fmt.height));
+        std::shared_ptr<Frame> frame;
+        for (auto& f : frames) {
+            if (!f || f.use_count() == 1) {
+                if (!f) f = std::make_shared<Frame>();
+                frame = f;
+                break;
+            }
+        }
+        if (!frame) frame = std::make_shared<Frame>();  // both held by thumbnail readers
+        std::vector<std::uint8_t>& full = frame->v210;
+        if (full.size() != full_bytes) full.assign(full_bytes, 0);
+        // Key and alpha planes only exist when keying is on (each is a full-frame write per grain).
+        std::vector<std::uint8_t> key(cfg.key_mode != KeyMode::Off ? full_bytes : 0);
+        std::vector<std::uint8_t> a10(cfg.key_mode == KeyMode::V210a ? alpha10_size(fmt.width, fmt.height) : 0);
         const int key_y = cfg.idle_key == IdleKey::Transparent ? cfg.key_min : cfg.key_max;
-        fill_v210(key.data(), fmt.width, fmt.height, key_y, kCMid, kCMid);
+        if (!key.empty()) fill_v210(key.data(), fmt.width, fmt.height, key_y, kCMid, kCMid);
         bool keyed_still = false;
         std::string item_name;
         if (idle || src.type == "pattern" || !media->ready) {
@@ -395,6 +422,7 @@ void Output::writer_main() {
         } else if (media->still) {
             keyed_still = true;
             if (media->still_fill.size() == full.size()) std::memcpy(full.data(), media->still_fill.data(), full.size());
+            else fill_v210(full.data(), fmt.width, fmt.height, kYBlack, kCMid, kCMid);
             if (media->still_key.size() == key.size()) std::memcpy(key.data(), media->still_key.data(), key.size());
             if (media->still_a10.size() == a10.size()) std::memcpy(a10.data(), media->still_a10.data(), a10.size());
             item_name = media->name;
@@ -402,6 +430,7 @@ void Output::writer_main() {
             const std::int64_t f = std::clamp<std::int64_t>(media_frame, 0, media->clip.frames - 1);
             const std::size_t off = static_cast<std::size_t>(f) * full.size();
             if (off + full.size() <= media->clip.v210.size()) std::memcpy(full.data(), media->clip.v210.data() + off, full.size());
+            else fill_v210(full.data(), fmt.width, fmt.height, kYBlack, kCMid, kCMid);
             item_name = media->name;
         } else {
             fill_v210(full.data(), fmt.width, fmt.height, kYBlack, kCMid, kCMid);
@@ -471,17 +500,19 @@ void Output::writer_main() {
         }
         overlay.apply(full.data(), (cfg.key_mode != KeyMode::Off) ? key.data() : nullptr, of);
 
-        std::vector<std::uint8_t> grain;
-        std::vector<std::uint8_t> key_grain;
+        // An interlaced grain is one field; a progressive grain is the frame itself (no copy).
+        std::vector<std::uint8_t> field_grain;
+        std::vector<std::uint8_t> field_key;
         if (inter) {
-            grain.resize(v210_size(fmt.width, fmt.field_height()));
-            key_grain.resize(grain.size());
-            extract_v210_field(full.data(), fmt.width, fmt.height, field, grain.data());
-            extract_v210_field(key.data(), fmt.width, fmt.height, field, key_grain.data());
-        } else {
-            grain = full;
-            key_grain = key;
+            field_grain.resize(v210_size(fmt.width, fmt.field_height()));
+            extract_v210_field(full.data(), fmt.width, fmt.height, field, field_grain.data());
+            if (!key.empty()) {
+                field_key.resize(field_grain.size());
+                extract_v210_field(key.data(), fmt.width, fmt.height, field, field_key.data());
+            }
         }
+        const std::vector<std::uint8_t>& grain = inter ? field_grain : full;
+        const std::vector<std::uint8_t>& key_grain = inter ? field_key : key;
         const bool write_v = master_v_.load();
         const bool write_a = master_a_.load();
         const bool write_d = master_d_.load() && cfg.anc;
@@ -554,19 +585,11 @@ void Output::writer_main() {
         grains_++;
         last_index = idx;
         have_last = true;
-        held = grain;
         if ((idx % 5) == 0) {
-            std::lock_guard lock(thumb_mu_);
-            // Keep a small JPEG of the full frame.
-            std::string tmp = "/tmp";
-            (void)tmp;
-            std::vector<std::uint8_t> jpg_mem;
-            // Encode via a temp path under the library parent is unnecessary; write into thumb_ as jpeg bytes.
-            const std::string path = std::string("/tmp/mtp-thumb-") + std::to_string(index_) + ".jpg";
-            if (v210_to_jpeg(path, full.data(), fmt.width, fmt.height, 320)) {
-                std::ifstream in(path, std::ios::binary);
-                thumb_.assign(std::istreambuf_iterator<char>(in), {});
-            }
+            frame->width = fmt.width;
+            frame->height = fmt.height;
+            frame->index = idx;
+            thumb_frame_.store(frame);
         }
         {
             std::lock_guard lock(meter_mu_);
@@ -578,7 +601,6 @@ void Output::writer_main() {
                 meters_[static_cast<std::size_t>(c)] = peak;
             }
         }
-        (void)held;
     }
     if (flows_open_) {
         video_.close(mxl_);
@@ -772,7 +794,17 @@ void Output::set_master(const std::string& sender_id, bool enabled) {
 }
 
 std::vector<std::uint8_t> Output::thumbnail() const {
+    const auto frame = thumb_frame_.load();
     std::lock_guard lock(thumb_mu_);
+    if (frame && frame->index != thumb_index_ && frame->v210.size() == v210_size(frame->width, frame->height)) {
+        // Encoded here, in the caller's thread, and only when a newer frame exists.
+        const std::string path = std::string("/tmp/mtp-thumb-") + std::to_string(index_) + ".jpg";
+        if (v210_to_jpeg(path, frame->v210.data(), frame->width, frame->height, 320)) {
+            std::ifstream in(path, std::ios::binary);
+            thumb_.assign(std::istreambuf_iterator<char>(in), {});
+            thumb_index_ = frame->index;
+        }
+    }
     return thumb_;
 }
 

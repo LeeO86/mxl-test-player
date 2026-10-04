@@ -16,6 +16,27 @@ Status: v1 implemented against draft spec v0.3. Deviations are recorded here, as
 - **RAM clips** are used when duration ≤ `PLAYER_RAM_CLIP_MAX_S` and the v210 payload fits `PLAYER_RAM_BUDGET_MB`. Longer files are not decode-ahead queued in this revision: playback of those items repeats black and counts underruns until a RAM-sized conversion is available. Patterns, stills, and RAM clips are written on the TAI clock with a repeat-last underrun path.
 - **Moving-box continuity.** Position is a pure function of the TAI grain index. A parameter edit stores a pixel delta so the box does not jump; that delta is part of output state, so a restart reproduces it. With a zero delta the position matches across restarts.
 - **Performance targets** (4×1080p50 for 1 h, 2×2160p50, 16× RAM) were not run on a Precision 3930 or R740. A single 720p25 pattern output on this container wrote grains with zero underruns over the integration window.
+- **Lab run 2026-10-03** (2× Xeon Gold 6136, this tree with the fixes in the CHANGELOG `Unreleased` section; 1.0.0 reached about 19 grains/s per 1080p50 pattern output):
+
+  | Case | Grains/s per output | Underruns | Process CPU |
+  | --- | --- | --- | --- |
+  | 4 × 1080p50 pattern, 120 s, quiet host | 50.0 | 11 | 2.0 cores |
+  | 4 × 1080p50 pattern, 1 h, host busy with builds and other benchmarks | 49.4 | about 2300 per output | – |
+  | 2 × 2160p50 pattern, 120 s | 34.9 | 3640 | 2.0 cores |
+  | 16 × 1080p50 pattern, 120 s | 49.9 | 286 | 9.1 cores |
+  | 16 × 1080p50 RAM clip (10 s ProRes mezzanine, same item), 120 s | 49.8 | 520 | 8.4 cores |
+
+  2160p50 misses: one core per output, about 29 ms per grain, mostly the burn-in (`composite_rgba_onto_v210`, `unpack_v210_line`, per-pixel `rgb_to_yuv709`, `pack_v210_line`). Each output keeps its own RAM copy of a clip, so 16 outputs of one 10 s item hold 44 GB. The ProRes long-item case is still not implemented (see above).
+- **Lab run 2026-10-04** (same host; 1.0.1 = the tree above plus the writer and burn-in changes in the CHANGELOG):
+
+  | Case | Before (2026-10-03 tree) | 1.0.1 |
+  | --- | --- | --- |
+  | 4 × 1080p50 pattern, 1 h, nothing else on the host | 179998 grains, 2–4 underruns per output | – |
+  | 4 × 1080p50 pattern, 120 s | 0 underruns, 2.07 cores | 0 underruns, 1.49 cores |
+  | 2 × 2160p50 pattern, 120 s | 32.2 grains/s, 4278 underruns, 1.97 cores | 49.7 grains/s, 83 underruns, 1.96 cores |
+  | 16 × 1080p50 pattern, 120 s | 49.95 grains/s, 154 underruns, 8.57 cores | 50.02 grains/s, 0 underruns, 6.87 cores |
+
+  The hour-long losses on 2026-10-03 (about 2300 per output) came from builds and benchmarks on the same host: on a quiet host the same image lost 2–4 grains per output in an hour. 2160p50 is now at one core per output; the rest is two 22 MB copies per grain (cached pattern into the frame, frame into the MXL grain).
 
 ## Build
 
