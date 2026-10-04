@@ -45,7 +45,7 @@ Precedence is environment, then the JSON file (`--config`, else `PLAYER_CONFIG`,
 | `PLAYER_SPRITE_MAX_PX` | `512` | Moving-box sprite size |
 | `MXL_DOMAIN_SCAN_PATH` | `/Volumes/mxl` | Parent of domain directories. No inputs are scanned |
 | `MXL_OUTPUT_DOMAIN_DIR` | `<scan>/player-<seed>` | This function's domain. Created if missing |
-| `MXL_OUTPUT_DOMAIN_ID` | UUIDv5(seed, `domain`) | Refuses to overwrite a different existing id |
+| `MXL_OUTPUT_DOMAIN_ID` | UUIDv5(seed, `domain`) | Used when the domain is created; a different existing id is logged and kept |
 | `MXL_HISTORY_DURATION_NS` | `1000000000` | Written into `options.json` only when that file is created |
 | `MXL_CLEANUP_ON_EXIT` | `false` | Remove only this domain on shutdown |
 | `NMOS_REGISTRY_ADDRESS` | empty | Registration API host. Empty disables registration |
@@ -70,7 +70,7 @@ Precedence is environment, then the JSON file (`--config`, else `PLAYER_CONFIG`,
 | --- | --- |
 | 0 | Clean stop (SIGINT) |
 | 75 | The web or NMOS port could not be bound, or the MXL domain could not be opened |
-| 78 | Invalid configuration, including a bad address, `NMOS_DNS_SD=true`, or a domain id that does not match the existing `domain_def.json` |
+| 78 | Invalid configuration, including a bad address, `NMOS_DNS_SD=true`, or a `domain_def.json` without an id |
 | 143 | SIGTERM after cleanup, or cleanup that exceeded `SHUTDOWN_TIMEOUT_S` |
 
 ## API

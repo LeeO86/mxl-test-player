@@ -10,8 +10,9 @@
 namespace mtp {
 
 // Creates the output domain once. Does not overwrite an existing domain_def.json
-// or options.json. Throws ConfigError when an existing id does not match.
-void ensure_output_domain(const std::string& domain_dir, const std::string& domain_id, std::uint64_t history_duration_ns);
+// or options.json. Returns the domain's id: an existing id that differs from
+// domain_id is logged and kept.
+std::string ensure_output_domain(const std::string& domain_dir, const std::string& domain_id, std::uint64_t history_duration_ns);
 
 class MxlSession {
 public:

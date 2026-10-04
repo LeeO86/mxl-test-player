@@ -39,12 +39,13 @@ std::string safe_group(std::string label) {
 
 }  // namespace
 
-void ensure_output_domain(const std::string& domain_dir, const std::string& domain_id, std::uint64_t history_duration_ns) {
+std::string ensure_output_domain(const std::string& domain_dir, const std::string& domain_id, std::uint64_t history_duration_ns) {
     namespace fs = std::filesystem;
     std::error_code ec;
     fs::create_directories(domain_dir, ec);
     if (ec) throw Error("cannot create MXL domain " + domain_dir + ": " + ec.message());
     const auto def_path = fs::path(domain_dir) / "domain_def.json";
+    std::string id = domain_id;
     if (fs::exists(def_path)) {
         std::ifstream in(def_path);
         nlohmann::json existing;
@@ -53,10 +54,11 @@ void ensure_output_domain(const std::string& domain_dir, const std::string& doma
         } catch (const std::exception& ex) {
             throw ConfigError(std::string("existing domain_def.json is not JSON: ") + ex.what());
         }
-        const auto id = existing.value("id", "");
+        id = existing.value("id", "");
+        if (id.empty()) throw ConfigError("domain_def.json in " + domain_dir + " has no id");
         if (id != domain_id) {
-            throw ConfigError("domain_def.json in " + domain_dir + " has id " + id + " which does not match MXL_OUTPUT_DOMAIN_ID " +
-                              domain_id + "; refusing to overwrite another domain");
+            log_error("domain_id_mismatch: domain_def.json in " + domain_dir + " has id " + id + ", not " + domain_id +
+                      "; keeping the existing id");
         }
     } else {
         std::ofstream out(def_path);
@@ -69,6 +71,7 @@ void ensure_output_domain(const std::string& domain_dir, const std::string& doma
         out << nlohmann::json{{"urn:x-mxl:option:history_duration/v1.0", history_duration_ns}}.dump(2) << "\n";
         if (!out) throw Error("cannot write " + opt_path.string());
     }
+    return id;
 }
 
 MxlSession::~MxlSession() { close(); }
@@ -76,8 +79,7 @@ MxlSession::~MxlSession() { close(); }
 void MxlSession::open(const std::string& domain_dir, const std::string& domain_id, std::uint64_t history_duration_ns) {
     close();
     domain_ = domain_dir;
-    domain_id_ = domain_id;
-    ensure_output_domain(domain_, domain_id_, history_duration_ns);
+    domain_id_ = ensure_output_domain(domain_, domain_id, history_duration_ns);
     instance_ = mxlCreateInstance(domain_.c_str(), nullptr);
     if (!instance_) throw Error("mxlCreateInstance failed for " + domain_);
     mxlGarbageCollectFlows(static_cast<mxlInstance>(instance_));

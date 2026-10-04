@@ -14,7 +14,7 @@ services:
       - "3211:3211"
 
   player:
-    image: ghcr.io/leeo86/mxl-test-player:nightly-dev
+    image: ghcr.io/leeo86/mxl-test-player:1.0.2
     build:
       context: ..
       dockerfile: docker/Dockerfile

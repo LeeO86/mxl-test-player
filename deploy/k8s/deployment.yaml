@@ -13,7 +13,7 @@ spec:
     metadata:
       labels:
         app: mxl-test-player
-        io.dmf.mxl.revision: "0.3.0"
+        io.dmf.mxl.revision: "218ddaa0a08c12ffe75fc475ae65aa3d9eef16d7"
     spec:
       terminationGracePeriodSeconds: 20
       securityContext:
@@ -23,7 +23,7 @@ spec:
         supplementalGroups: [1000]
       containers:
         - name: player
-          image: ghcr.io/leeo86/mxl-test-player:nightly-dev
+          image: ghcr.io/leeo86/mxl-test-player:1.0.2
           imagePullPolicy: IfNotPresent
           ports:
             - name: web

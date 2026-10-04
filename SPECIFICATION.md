@@ -307,8 +307,8 @@ is kept (configurable retention) so changing the platform format later is possib
   of name to string array) is added to the node and the device.
 - Senders write into the player's own domain only. `domain_def.json` and
   `options.json` are written when the directory is created and are not rewritten
-  on later starts. A different id already in `domain_def.json` is an error (exit
-  78), not an overwrite.
+  on later starts. A different id already in `domain_def.json` is logged
+  (`domain_id_mismatch`) and kept, not overwritten; NMOS announces that id.
 - There are no receivers. IS-05 applies to senders: a staged PATCH with
   `master_enable` and `activate_immediate` starts or stops that flow.
   `master_enable: false` stops writing. The active enable flags are restored
