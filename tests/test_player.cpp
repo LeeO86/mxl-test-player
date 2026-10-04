@@ -477,7 +477,10 @@ TEST_CASE("output domain is created once and not overwritten") {
     nlohmann::json j;
     in >> j;
     CHECK(j["urn:x-mxl:option:history_duration/v1.0"] == 1000000000ull);
-    CHECK_THROWS_AS(ensure_output_domain(dir.string(), "22222222-2222-5222-8222-222222222222", 1000000000ull), ConfigError);
+    // Another id is logged and kept, not overwritten.
+    CHECK(ensure_output_domain(dir.string(), "22222222-2222-5222-8222-222222222222", 1000000000ull) ==
+          "11111111-1111-5111-8111-111111111111");
+    CHECK(std::filesystem::last_write_time(def) == first);
     std::filesystem::remove_all(dir);
 }
 

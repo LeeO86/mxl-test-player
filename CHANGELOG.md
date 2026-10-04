@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.2
+
+- An existing `domain_def.json` with another id than `MXL_OUTPUT_DOMAIN_ID` is logged (`domain_id_mismatch`) and kept, and NMOS announces that id. The player exited 78 before (platform guideline G2). A `domain_def.json` without an id still exits 78.
+- The Kubernetes and Compose examples use the released image `1.0.2` instead of the moving `nightly-dev`, and the example's `io.dmf.mxl.revision` label is the MXL commit instead of `0.3.0`. The CMake project version is 1.0.2.
+
 ## 1.0.1
 
 - NMOS registration sends complete IS-04 v1.3 resources (node `description` and `interfaces`, device `description`, source `caps` and audio `channels`, the flow's `flow_def.json`, sender `tags`). nmos-cpp rejected the previous bodies, so `/readyz` never turned 200 against it. Registry and Node API now use the same builders.
