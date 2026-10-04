@@ -114,15 +114,39 @@ int alpha_to_key(double a, int key_min, int key_max) {
 void composite_rgba_onto_v210(std::uint8_t* v210, int width, int height, int x0, int y0, int bw, int bh,
                               const std::uint8_t* rgba, double opacity) {
     if (bw <= 0 || bh <= 0 || opacity <= 0.0) return;
+    const int xa = std::max(0, x0);
+    const int xb = std::min(width, x0 + bw);
+    if (xa >= xb) return;
+    // Only the 6-pixel groups under the box are unpacked and packed again. The
+    // whole line for every row of every text box was most of a 2160p grain.
+    const int g0 = xa / 6;
+    const int groups = (xb + 5) / 6 - g0;
+    const int px0 = g0 * 6;
     const std::uint32_t stride = v210_line_stride(width);
-    std::vector<std::uint16_t> y(static_cast<std::size_t>(width));
-    std::vector<std::uint16_t> cb(static_cast<std::size_t>(width / 2));
-    std::vector<std::uint16_t> cr(static_cast<std::size_t>(width / 2));
+    std::vector<std::uint16_t> y(static_cast<std::size_t>(groups) * 6);
+    std::vector<std::uint16_t> cb(static_cast<std::size_t>(groups) * 3);
+    std::vector<std::uint16_t> cr(static_cast<std::size_t>(groups) * 3);
     for (int row = 0; row < bh; ++row) {
         const int dy = y0 + row;
         if (dy < 0 || dy >= height) continue;
-        std::uint8_t* line = v210 + static_cast<std::size_t>(dy) * stride;
-        unpack_v210_line(line, width, y.data(), cb.data(), cr.data());
+        auto* words = reinterpret_cast<std::uint32_t*>(v210 + static_cast<std::size_t>(dy) * stride) + static_cast<std::size_t>(g0) * 4;
+        for (int g = 0; g < groups; ++g) {
+            const std::uint32_t* w = words + g * 4;
+            const int x = g * 6;
+            const int c = g * 3;
+            cb[c] = static_cast<std::uint16_t>(w[0] & 0x3FF);
+            y[x] = static_cast<std::uint16_t>((w[0] >> 10) & 0x3FF);
+            cr[c] = static_cast<std::uint16_t>((w[0] >> 20) & 0x3FF);
+            y[x + 1] = static_cast<std::uint16_t>(w[1] & 0x3FF);
+            cb[c + 1] = static_cast<std::uint16_t>((w[1] >> 10) & 0x3FF);
+            y[x + 2] = static_cast<std::uint16_t>((w[1] >> 20) & 0x3FF);
+            cr[c + 1] = static_cast<std::uint16_t>(w[2] & 0x3FF);
+            y[x + 3] = static_cast<std::uint16_t>((w[2] >> 10) & 0x3FF);
+            cb[c + 2] = static_cast<std::uint16_t>((w[2] >> 20) & 0x3FF);
+            y[x + 4] = static_cast<std::uint16_t>(w[3] & 0x3FF);
+            cr[c + 2] = static_cast<std::uint16_t>((w[3] >> 10) & 0x3FF);
+            y[x + 5] = static_cast<std::uint16_t>((w[3] >> 20) & 0x3FF);
+        }
         bool dirty = false;
         for (int col = 0; col < bw; ++col) {
             const int dx = x0 + col;
@@ -131,13 +155,24 @@ void composite_rgba_onto_v210(std::uint8_t* v210, int width, int height, int x0,
             const double a = (p[3] / 255.0) * opacity;
             if (a <= 0.001) continue;
             const Yuv10 over = rgb_to_yuv709(p[0] / 255.0, p[1] / 255.0, p[2] / 255.0);
-            const int c = dx / 2;
-            y[dx] = static_cast<std::uint16_t>(y[dx] * (1.0 - a) + over.y * a + 0.5);
+            const int i = dx - px0;
+            const int c = i / 2;
+            y[i] = static_cast<std::uint16_t>(y[i] * (1.0 - a) + over.y * a + 0.5);
             cb[c] = static_cast<std::uint16_t>(cb[c] * (1.0 - a) + over.cb * a + 0.5);
             cr[c] = static_cast<std::uint16_t>(cr[c] * (1.0 - a) + over.cr * a + 0.5);
             dirty = true;
         }
-        if (dirty) pack_v210_line(y.data(), cb.data(), cr.data(), width, line);
+        if (!dirty) continue;
+        for (int g = 0; g < groups; ++g) {
+            std::uint32_t* w = words + g * 4;
+            const int x = g * 6;
+            const int c = g * 3;
+            auto v = [](std::uint16_t s) { return static_cast<std::uint32_t>(s & 0x3FFu); };
+            w[0] = v(cb[c]) | (v(y[x]) << 10) | (v(cr[c]) << 20);
+            w[1] = v(y[x + 1]) | (v(cb[c + 1]) << 10) | (v(y[x + 2]) << 20);
+            w[2] = v(cr[c + 1]) | (v(y[x + 3]) << 10) | (v(cb[c + 2]) << 20);
+            w[3] = v(y[x + 4]) | (v(cr[c + 2]) << 10) | (v(y[x + 5]) << 20);
+        }
     }
 }
 
