@@ -1,10 +1,13 @@
 # Changelog
 
-## Unreleased
+## 1.0.1
 
 - NMOS registration sends complete IS-04 v1.3 resources (node `description` and `interfaces`, device `description`, source `caps` and audio `channels`, the flow's `flow_def.json`, sender `tags`). nmos-cpp rejected the previous bodies, so `/readyz` never turned 200 against it. Registry and Node API now use the same builders.
 - Still test patterns are rendered once per writer thread and copied. A 1080p50 output took about 53 ms per grain and ran at about 19 fps; four outputs now keep 50 fps.
 - The writer no longer fills and copies a key frame when keying is off and writes progressive grains without an extra copy.
+- The writer thread reuses two frame buffers instead of allocating and zero-filling a new frame for every grain, and no longer encodes the thumbnail JPEG (every fifth grain, through a file): `GET .../thumbnail` encodes it from the latest frame when asked.
+- Burn-ins are composited over the 6-pixel groups under each box instead of unpacking and packing the whole line for every row of the box. Same pixels as before.
+- Measured on the lab host (2× Xeon Gold 6136, 120 s each): 2 × 2160p50 pattern outputs 32.2 → 49.7 grains/s per output; 16 × 1080p50 154 → 0 underruns at 8.6 → 6.9 cores; 4 × 1080p50 2.1 → 1.5 cores. Four 1080p50 outputs ran one hour on a quiet host with 2–4 underruns per output.
 - The process raises its open-file soft limit to the hard limit at start. Each MXL flow keeps a descriptor per grain; with Docker's default of 1024, 16 outputs failed to open their flows and the process crashed.
 
 ## 1.0.0
