@@ -141,8 +141,18 @@ private:
     };
     Sprite sprites_[2];
 
+    // The writer publishes a rendered frame every few grains; thumbnail() encodes
+    // the JPEG from it when asked, so the writer thread never encodes.
+    struct Frame {
+        std::vector<std::uint8_t> v210;
+        int width = 0;
+        int height = 0;
+        std::uint64_t index = 0;
+    };
+    std::atomic<std::shared_ptr<const Frame>> thumb_frame_;
     mutable std::mutex thumb_mu_;
-    std::vector<std::uint8_t> thumb_;
+    mutable std::vector<std::uint8_t> thumb_;
+    mutable std::uint64_t thumb_index_ = 0;
     mutable std::mutex meter_mu_;
     std::vector<float> meters_;
 };

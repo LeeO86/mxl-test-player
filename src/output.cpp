@@ -286,6 +286,9 @@ void Output::writer_main() {
     MezzanineReader reader;
     std::string reader_path;
     std::int64_t last_loop_index = 0;
+    // Two frame buffers, reused: one may be the published thumbnail frame while
+    // the other is rendered. A new 5.5 MB buffer per grain cost a zero fill each.
+    std::shared_ptr<Frame> frames[2];
     while (!stop_) {
         OutputConfig cfg;
         SourceDesc src;
@@ -383,7 +386,17 @@ void Output::writer_main() {
         }
 
         const std::size_t full_bytes = v210_size(fmt.width, fmt.height);
-        std::vector<std::uint8_t> full(full_bytes);
+        std::shared_ptr<Frame> frame;
+        for (auto& f : frames) {
+            if (!f || f.use_count() == 1) {
+                if (!f) f = std::make_shared<Frame>();
+                frame = f;
+                break;
+            }
+        }
+        if (!frame) frame = std::make_shared<Frame>();  // both held by thumbnail readers
+        std::vector<std::uint8_t>& full = frame->v210;
+        if (full.size() != full_bytes) full.assign(full_bytes, 0);
         // Key and alpha planes only exist when keying is on (each is a full-frame write per grain).
         std::vector<std::uint8_t> key(cfg.key_mode != KeyMode::Off ? full_bytes : 0);
         std::vector<std::uint8_t> a10(cfg.key_mode == KeyMode::V210a ? alpha10_size(fmt.width, fmt.height) : 0);
@@ -409,6 +422,7 @@ void Output::writer_main() {
         } else if (media->still) {
             keyed_still = true;
             if (media->still_fill.size() == full.size()) std::memcpy(full.data(), media->still_fill.data(), full.size());
+            else fill_v210(full.data(), fmt.width, fmt.height, kYBlack, kCMid, kCMid);
             if (media->still_key.size() == key.size()) std::memcpy(key.data(), media->still_key.data(), key.size());
             if (media->still_a10.size() == a10.size()) std::memcpy(a10.data(), media->still_a10.data(), a10.size());
             item_name = media->name;
@@ -416,6 +430,7 @@ void Output::writer_main() {
             const std::int64_t f = std::clamp<std::int64_t>(media_frame, 0, media->clip.frames - 1);
             const std::size_t off = static_cast<std::size_t>(f) * full.size();
             if (off + full.size() <= media->clip.v210.size()) std::memcpy(full.data(), media->clip.v210.data() + off, full.size());
+            else fill_v210(full.data(), fmt.width, fmt.height, kYBlack, kCMid, kCMid);
             item_name = media->name;
         } else {
             fill_v210(full.data(), fmt.width, fmt.height, kYBlack, kCMid, kCMid);
@@ -571,17 +586,10 @@ void Output::writer_main() {
         last_index = idx;
         have_last = true;
         if ((idx % 5) == 0) {
-            std::lock_guard lock(thumb_mu_);
-            // Keep a small JPEG of the full frame.
-            std::string tmp = "/tmp";
-            (void)tmp;
-            std::vector<std::uint8_t> jpg_mem;
-            // Encode via a temp path under the library parent is unnecessary; write into thumb_ as jpeg bytes.
-            const std::string path = std::string("/tmp/mtp-thumb-") + std::to_string(index_) + ".jpg";
-            if (v210_to_jpeg(path, full.data(), fmt.width, fmt.height, 320)) {
-                std::ifstream in(path, std::ios::binary);
-                thumb_.assign(std::istreambuf_iterator<char>(in), {});
-            }
+            frame->width = fmt.width;
+            frame->height = fmt.height;
+            frame->index = idx;
+            thumb_frame_.store(frame);
         }
         {
             std::lock_guard lock(meter_mu_);
@@ -786,7 +794,17 @@ void Output::set_master(const std::string& sender_id, bool enabled) {
 }
 
 std::vector<std::uint8_t> Output::thumbnail() const {
+    const auto frame = thumb_frame_.load();
     std::lock_guard lock(thumb_mu_);
+    if (frame && frame->index != thumb_index_ && frame->v210.size() == v210_size(frame->width, frame->height)) {
+        // Encoded here, in the caller's thread, and only when a newer frame exists.
+        const std::string path = std::string("/tmp/mtp-thumb-") + std::to_string(index_) + ".jpg";
+        if (v210_to_jpeg(path, frame->v210.data(), frame->width, frame->height, 320)) {
+            std::ifstream in(path, std::ios::binary);
+            thumb_.assign(std::istreambuf_iterator<char>(in), {});
+            thumb_index_ = frame->index;
+        }
+    }
     return thumb_;
 }
 
