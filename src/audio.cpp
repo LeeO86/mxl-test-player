@@ -28,20 +28,40 @@ float pink_at(std::uint64_t sample, int ch) {
     return acc * 0.35f;
 }
 
-// sin(2π·freq·sample/48000) for an absolute (TAI) sample index. The plain argument is about
-// 1e13 radians: double resolves it only to about 0.002 rad, and libm needs its slow range
-// reduction for every sample. The phase is reduced to [0, 1) cycles first: the integer part
-// of the frequency adds whole cycles every second.
-double tone(double freq, std::uint64_t sample) {
+// The phase of freq·sample/48000 in [0, 1) cycles for an absolute (TAI) sample index. The plain
+// argument of sin(2π·f·t) is about 1e13 radians: double resolves it only to about 0.002 rad,
+// and libm needs its slow range reduction. The integer part of the frequency adds whole
+// cycles every second, so only its fraction counts the seconds.
+double tone_cycles(double freq, std::uint64_t sample) {
     const std::uint64_t seconds = sample / 48000u;
     const std::uint64_t rest = sample % 48000u;
     const double fraction = freq - std::floor(freq);
     double cycles = fraction * static_cast<double>(seconds);
     cycles -= std::floor(cycles);
     cycles += freq * static_cast<double>(rest) / kSr;
-    cycles -= std::floor(cycles);
-    return std::sin(2.0 * kPi * cycles);
+    return cycles - std::floor(cycles);
 }
+
+// A sine from the exact phase at a block start, advanced by rotation per sample (no libm call
+// per sample; the error after a 48000-sample block is far below float resolution).
+struct Phasor {
+    double s = 0, c = 1, ds = 0, dc = 1;
+    Phasor(double freq, std::uint64_t start) {
+        const double p = 2.0 * kPi * tone_cycles(freq, start);
+        s = std::sin(p);
+        c = std::cos(p);
+        const double d = 2.0 * kPi * freq / kSr;
+        ds = std::sin(d);
+        dc = std::cos(d);
+    }
+    double next() {
+        const double v = s;
+        const double ns = s * dc + c * ds;
+        c = c * dc - s * ds;
+        s = ns;
+        return v;
+    }
+};
 
 }  // namespace
 
@@ -112,9 +132,13 @@ void render_audio(const AudioProgram& prog, std::uint64_t start, int count, bool
         float* dst = planar + static_cast<std::size_t>(c) * static_cast<std::size_t>(count);
         const AudioChannel& ch = prog.channels[static_cast<std::size_t>(c)];
         const double amp = dbfs_to_lin(ch.level_dbfs + ch.gain_db);
+        Phasor sine(ch.signal == AudioSignal::IdentBeeps ? 1000.0 : ch.frequency, start);
         for (int i = 0; i < count; ++i) {
             const std::uint64_t s = start + static_cast<std::uint64_t>(i);
             const double t = static_cast<double>(s) / kSr;
+            const double tone = sine.next();
+            // Position within the second in samples; integers, not fmod() per sample.
+            const std::uint64_t in_second = s % 48000u;
             double v = 0.0;
             switch (ch.signal) {
                 case AudioSignal::Silence:
@@ -122,35 +146,25 @@ void render_audio(const AudioProgram& prog, std::uint64_t start, int count, bool
                     break;
                 case AudioSignal::Sine:
                 case AudioSignal::IdentFreq:
-                    v = tone(ch.frequency, s);
+                    v = tone;
                     break;
                 case AudioSignal::IdentEbu: {
-                    v = tone(ch.frequency, s);
+                    v = tone;
                     if (c == 0) {
-                        // Left channel interrupted: 0.5 s tone, 0.5 s silence.
-                        if (static_cast<int>(t) % 2 == 1 && (t - std::floor(t)) < 0.5) {
-                            // tone on even seconds fully, and first half of odd? 
-                        }
-                        const double phase = std::fmod(t, 1.0);
-                        const int sec = static_cast<int>(std::floor(t));
-                        if ((sec % 2) == 1 && phase < 0.5) v = 0.0;
-                        // Simpler classic GLITS-style: 250 ms off every second on the left.
-                        if (std::fmod(t, 1.0) < 0.25) v = 0.0;
+                        // Left channel interrupted: off for the first half of odd seconds, and
+                        // (GLITS-style) for the first 250 ms of every second.
+                        if (((s / 48000u) % 2) == 1 && in_second < 24000u) v = 0.0;
+                        if (in_second < 12000u) v = 0.0;
                     }
                     break;
                 }
                 case AudioSignal::IdentBeeps: {
-                    // n beeps for 1-based channel n. 80 ms beep, 80 ms gap, then a rest.
-                    const int n = c + 1;
-                    const double beep = 0.080;
-                    const double gap = 0.080;
-                    const double rest = 0.400;
-                    const double cycle = n * (beep + gap) + rest;
-                    const double p = std::fmod(t, cycle);
-                    const double slot = beep + gap;
-                    const int which = static_cast<int>(p / slot);
-                    const double in = p - which * slot;
-                    if (which < n && in < beep) v = tone(1000.0, s);
+                    // n beeps for 1-based channel n. 80 ms beep, 80 ms gap, then a 400 ms rest.
+                    const std::uint64_t n = static_cast<std::uint64_t>(c) + 1;
+                    constexpr std::uint64_t kBeep = 3840;  // 80 ms
+                    constexpr std::uint64_t kSlot = 7680;  // beep + gap
+                    const std::uint64_t p = s % (n * kSlot + 19200u);
+                    if (p / kSlot < n && p % kSlot < kBeep) v = tone;
                     break;
                 }
                 case AudioSignal::Pink:
@@ -173,9 +187,9 @@ void render_audio(const AudioProgram& prog, std::uint64_t start, int count, bool
                     break;
                 }
                 case AudioSignal::Polarity: {
-                    const double p = std::fmod(t, 0.020);
-                    if (p < 0.001) v = 1.0;
-                    else if (p < 0.003) v = -0.5;
+                    const std::uint64_t p = s % 960u;  // 20 ms
+                    if (p < 48u) v = 1.0;               // 1 ms
+                    else if (p < 144u) v = -0.5;        // to 3 ms
                     else v = 0.0;
                     break;
                 }

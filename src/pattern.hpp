@@ -4,6 +4,7 @@
 #include "v210.hpp"
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
 
@@ -50,5 +51,16 @@ struct PatternRequest {
 
 // Writes one MXL grain (a frame, or one field when format is interlaced and field >= 0).
 void render_pattern(const PatternRequest& req, std::uint8_t* v210);
+
+// A frame that stays the same from grain to grain, and a token that identifies its content:
+// the same token (compared by address, kept alive by its holder) means the same bytes.
+struct StillFrame {
+    const std::uint8_t* data = nullptr;
+    std::shared_ptr<const void> token;
+};
+
+// The cached frame of a pattern that does not move (rendered on first use, per thread), or an
+// empty StillFrame for a moving one.
+StillFrame still_pattern(const PatternRequest& req);
 
 }  // namespace mtp

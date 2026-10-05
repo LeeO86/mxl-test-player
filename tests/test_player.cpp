@@ -152,6 +152,34 @@ TEST_CASE("burn-in composite touches only the groups under the box, same pixels 
     }
 }
 
+TEST_CASE("restoring the composited boxes gives back the frame under the overlay") {
+    // The writer keeps a still source in a grain slot and restores only the overlay's boxes.
+    std::uint32_t seed = 11;
+    auto rnd = [&]() { seed = seed * 1664525u + 1013904223u; return seed >> 8; };
+    const VideoFormat fmt = *parse_format("720p25");
+    PatternRequest req;
+    req.format = fmt;
+    req.pattern = VideoPattern::SmpteRp219;
+    const StillFrame still = still_pattern(req);
+    REQUIRE(still.data != nullptr);
+    CHECK(still_pattern(req).token == still.token);  // the same content keeps its token
+    const std::vector<std::uint8_t> under(still.data, still.data + v210_size(fmt.width, fmt.height));
+    auto frame = under;
+    struct Box { int x, y, w, h; double opacity; };
+    const std::vector<Box> boxes{{100, 3, 301, 20, 1.0}, {-17, -5, 90, 30, 0.6}, {fmt.width - 50, fmt.height - 10, 120, 25, 0.9}, {7, 0, 5, 720, 1.0}};
+    for (const Box& box : boxes) {
+        std::vector<std::uint8_t> rgba(static_cast<std::size_t>(box.w) * box.h * 4);
+        for (auto& v : rgba) v = static_cast<std::uint8_t>(rnd());
+        composite_rgba_onto_v210(frame.data(), fmt.width, fmt.height, box.x, box.y, box.w, box.h, rgba.data(), box.opacity);
+    }
+    CHECK(frame != under);
+    for (const Box& box : boxes) restore_v210_rect(frame.data(), still.data, fmt.width, fmt.height, box.x, box.y, box.w, box.h);
+    CHECK(frame == under);
+    // Moving patterns have no still frame.
+    req.pattern = VideoPattern::Motion;
+    CHECK(still_pattern(req).data == nullptr);
+}
+
 TEST_CASE("v210 pack roundtrip and legal black") {
     const int w = 48, h = 2;
     std::vector<std::uint8_t> buf(v210_size(w, h));

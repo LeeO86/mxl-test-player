@@ -17,6 +17,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <unordered_map>
 #include <unistd.h>
 
 namespace mtp {
@@ -51,6 +52,43 @@ struct GrainTarget {
         return flow->commit_grain();
     }
 };
+
+// What one plane of a grain slot holds under the overlay: the still source (by token; null when
+// unknown or rendered) and the areas the overlay drew on it last.
+struct PlaneState {
+    std::shared_ptr<const void> token;
+    std::vector<DrawnRect> rects;
+};
+
+// A grain slot of the ring, found by its payload address (stable while the flow is open).
+struct SlotState {
+    PlaneState fill;   // the v210 fill, or the key for key grains
+    PlaneState alpha;  // the v210a alpha plane; the overlay never draws on it
+};
+
+// Puts a still source under the overlay. A grain slot that holds it already gets back only the
+// areas the last overlay drew on; anything else is copied whole. A frame rendered in place
+// (src.data null) leaves the slot's content unknown.
+void place_still(std::uint8_t* dst, std::size_t bytes, int width, int height, const StillFrame& src, PlaneState* state) {
+    if (!src.data) {
+        if (state) state->token.reset();
+        return;
+    }
+    if (state && state->token && state->token == src.token) {
+        for (const auto& r : state->rects) restore_v210_rect(dst, src.data, width, height, r.x, r.y, r.w, r.h);
+        return;
+    }
+    std::memcpy(dst, src.data, bytes);
+    if (state) state->token = src.token;
+}
+
+// The same for a plane the overlay never draws on; a source without data is zeros.
+void place_plane(std::uint8_t* dst, std::size_t bytes, const StillFrame& src, PlaneState* state) {
+    if (state && state->token && state->token == src.token) return;
+    if (src.data) std::memcpy(dst, src.data, bytes);
+    else std::memset(dst, 0, bytes);
+    if (state) state->token = src.token;
+}
 
 std::string hostname() {
     const char* announced = std::getenv("NMOS_HOST_ADDRESS");
@@ -317,23 +355,32 @@ void Output::writer_main() {
     // Two frame buffers, reused: one may be the published thumbnail frame while
     // the other is rendered. A new 5.5 MB buffer per grain cost a zero fill each.
     std::shared_ptr<Frame> frames[2];
-    // Packed once per format and copied: packing every line per grain was a cost of its own.
+    // Black is packed once per format: packing every line per grain was a cost of its own.
     std::vector<std::uint8_t> black;
+    std::shared_ptr<const void> black_token;
     int black_w = 0;
     int black_h = 0;
-    auto fill_black = [&](std::uint8_t* dst, int w, int h) {
+    auto black_frame = [&](int w, int h) -> StillFrame {
         if (w != black_w || h != black_h) {
             black.assign(v210_size(w, h), 0);
             fill_v210(black.data(), w, h, kYBlack, kCMid, kCMid);
             black_w = w;
             black_h = h;
+            black_token = std::make_shared<int>(0);
         }
-        std::memcpy(dst, black.data(), black.size());
+        return {black.data(), black_token};
     };
     std::vector<std::uint8_t> key_idle;  // the idle key frame
+    std::shared_ptr<const void> key_idle_token;
     int key_idle_y = -1;
+    const std::shared_ptr<const void> zeros_token = std::make_shared<int>(0);  // an all-zero alpha plane
     std::vector<std::uint8_t> key_buf;   // the key, unless it is rendered into its grain
     std::vector<std::uint8_t> a10_buf;   // the v210a alpha plane, unless rendered into the grain
+    // Grain slots of the video and key flows; forgotten whenever the flows are opened again.
+    std::unordered_map<const std::uint8_t*, SlotState> fill_slots;
+    std::unordered_map<const std::uint8_t*, SlotState> key_slots;
+    std::vector<DrawnRect> drawn_fill;
+    std::vector<DrawnRect> drawn_key;
     while (!stop_) {
         OutputConfig cfg;
         SourceDesc src;
@@ -352,6 +399,8 @@ void Output::writer_main() {
         }
         if (gen != applied_gen_) {
             reopen(cfg, fmt);
+            fill_slots.clear();  // new writers, new grain mappings
+            key_slots.clear();
             applied_gen_ = gen;
             have_last = false;
             {
@@ -458,14 +507,16 @@ void Output::writer_main() {
             video_grain.open(video_, idx, full_bytes + a10_bytes);
             if (video_grain.direct) fill = video_grain.payload;
         }
-        // Key and alpha planes only exist when keying is on. The idle key frame is packed once.
+        // The fill_key key; v210a carries its alpha plane after the fill instead. The idle key
+        // frame is packed once.
         const int key_y = cfg.idle_key == IdleKey::Transparent ? cfg.key_min : cfg.key_max;
         std::uint8_t* key = nullptr;
-        if (cfg.key_mode != KeyMode::Off) {
+        if (cfg.key_mode == KeyMode::FillKey) {
             if (key_idle.size() != full_bytes || key_idle_y != key_y) {
                 key_idle.assign(full_bytes, 0);
                 fill_v210(key_idle.data(), fmt.width, fmt.height, key_y, kCMid, kCMid);
                 key_idle_y = key_y;
+                key_idle_token = std::make_shared<int>(0);
             }
             key_buf.resize(full_bytes);
             key = key_buf.data();
@@ -473,7 +524,6 @@ void Output::writer_main() {
                 key_grain_target.open(key_, idx, full_bytes);
                 if (key_grain_target.direct) key = key_grain_target.payload;
             }
-            std::memcpy(key, key_idle.data(), full_bytes);
         }
         std::uint8_t* a10 = nullptr;
         if (v210a) {
@@ -483,8 +533,12 @@ void Output::writer_main() {
                 a10_buf.resize(a10_bytes);
                 a10 = a10_buf.data();
             }
-            std::memset(a10, 0, a10_bytes);
         }
+        // What the grain shows under the overlay. A still source (a pattern that does not move, a
+        // still image, black) is not copied again into a grain slot that already holds it.
+        StillFrame fill_src;
+        StillFrame key_src{key_idle.data(), key_idle_token};
+        StillFrame a10_src{nullptr, zeros_token};
         bool keyed_still = false;
         std::string item_name;
         if (idle || src.type == "pattern" || !media->ready) {
@@ -496,28 +550,33 @@ void Output::writer_main() {
                 req.frame_index = static_cast<std::uint64_t>(std::max<std::int64_t>(0, media_frame));
                 req.field = -1;
                 req.flash = (src.sync_beep || src.pattern == "av_sync") && is_sync_frame(req.frame_index, fmt.frame_rate);
-                render_pattern(req, fill);
+                fill_src = still_pattern(req);
+                if (!fill_src.data) render_pattern(req, fill);
             } else {
-                fill_black(fill, fmt.width, fmt.height);
+                fill_src = black_frame(fmt.width, fmt.height);
                 // Not ready yet means the loader is still decoding. Keep black on time;
                 // that wait is not an underrun.
             }
         } else if (media->still) {
             keyed_still = true;
-            if (media->still_fill.size() == full_bytes) std::memcpy(fill, media->still_fill.data(), full_bytes);
-            else fill_black(fill, fmt.width, fmt.height);
-            if (key && media->still_key.size() == full_bytes) std::memcpy(key, media->still_key.data(), full_bytes);
-            if (a10 && media->still_a10.size() == a10_bytes) std::memcpy(a10, media->still_a10.data(), a10_bytes);
+            fill_src = media->still_fill.size() == full_bytes ? StillFrame{media->still_fill.data(), media} : black_frame(fmt.width, fmt.height);
+            if (media->still_key.size() == full_bytes) key_src = StillFrame{media->still_key.data(), media};
+            if (media->still_a10.size() == a10_bytes) a10_src = StillFrame{media->still_a10.data(), media};
             item_name = media->name;
         } else if (media->ram && media->clip.frames > 0) {
             const std::int64_t f = std::clamp<std::int64_t>(media_frame, 0, media->clip.frames - 1);
             const std::size_t off = static_cast<std::size_t>(f) * full_bytes;
             if (off + full_bytes <= media->clip.v210.size()) std::memcpy(fill, media->clip.v210.data() + off, full_bytes);
-            else fill_black(fill, fmt.width, fmt.height);
+            else fill_src = black_frame(fmt.width, fmt.height);
             item_name = media->name;
         } else {
-            fill_black(fill, fmt.width, fmt.height);
+            fill_src = black_frame(fmt.width, fmt.height);
         }
+        SlotState* fill_slot = video_grain.direct ? &fill_slots[fill] : nullptr;
+        SlotState* key_slot = key_grain_target.direct ? &key_slots[key] : nullptr;
+        place_still(fill, full_bytes, fmt.width, fmt.height, fill_src, fill_slot ? &fill_slot->fill : nullptr);
+        if (a10) place_plane(a10, a10_bytes, a10_src, fill_slot ? &fill_slot->alpha : nullptr);
+        if (key) place_still(key, full_bytes, fmt.width, fmt.height, key_src, key_slot ? &key_slot->fill : nullptr);
 
         PlaceholderVars vars;
         vars.label = cfg.label;
@@ -581,7 +640,11 @@ void Output::writer_main() {
                 of.sprites[i].h = sprites_[i].h;
             }
         }
-        overlay.apply(fill, key, of);
+        drawn_fill.clear();
+        drawn_key.clear();
+        overlay.apply(fill, key, of, &drawn_fill, &drawn_key);
+        if (fill_slot) fill_slot->fill.rects = drawn_fill;
+        if (key_slot) key_slot->fill.rects = drawn_key;
 
         // A thumbnail frame is published every 5th grain; rendered in place, it is copied out
         // of the grain only when thumbnail() asked for one.

@@ -353,28 +353,10 @@ const char* video_pattern_name(VideoPattern p) {
     }
 }
 
-void render_pattern(const PatternRequest& req, std::uint8_t* v210) {
-    const int w = req.format.width;
-    const int h = (req.field >= 0 && req.format.interlaced()) ? req.format.field_height() : req.format.height;
+namespace {
+
+void render_raster(const PatternRequest& req, int w, int h, bool flash, std::uint8_t* v210) {
     const std::uint64_t frame = req.frame_index;
-    const bool flash = req.flash || (req.pattern == VideoPattern::AvSync && is_sync_frame(frame, req.format.frame_rate));
-    const std::size_t size = static_cast<std::size_t>(v210_line_stride(w)) * h;
-    // Patterns that do not move are rendered once per writer thread and then
-    // copied: converting every pixel again costs about one core per 1080p50 output.
-    struct Cached {
-        VideoPattern pattern;
-        bool pluge;
-        int w, h;
-        std::vector<std::uint8_t> v210;
-    };
-    thread_local Cached cache[2];  // one per flash state (av_sync alternates)
-    Cached& c = cache[flash ? 1 : 0];
-    const bool still = req.pattern != VideoPattern::ZonePlateMoving && req.pattern != VideoPattern::Motion &&
-                       req.pattern != VideoPattern::FieldOrder;
-    if (still && c.v210.size() == size && c.pattern == req.pattern && c.pluge == req.pluge && c.w == w && c.h == h) {
-        std::memcpy(v210, c.v210.data(), size);
-        return;
-    }
     Raster r(w, h);
     switch (req.pattern) {
         case VideoPattern::Ebu100_75: bars(r, kEbu10075, 7, req.pluge); break;
@@ -405,7 +387,54 @@ void render_pattern(const PatternRequest& req, std::uint8_t* v210) {
     }
     if (flash) solid(r, 1, 1, 1);
     r.pack(v210);
-    if (still) c = Cached{req.pattern, req.pluge, w, h, std::vector<std::uint8_t>(v210, v210 + size)};
+}
+
+int grain_height(const PatternRequest& req) {
+    return (req.field >= 0 && req.format.interlaced()) ? req.format.field_height() : req.format.height;
+}
+
+bool flash_of(const PatternRequest& req) {
+    return req.flash || (req.pattern == VideoPattern::AvSync && is_sync_frame(req.frame_index, req.format.frame_rate));
+}
+
+}  // namespace
+
+StillFrame still_pattern(const PatternRequest& req) {
+    if (req.pattern == VideoPattern::ZonePlateMoving || req.pattern == VideoPattern::Motion || req.pattern == VideoPattern::FieldOrder) return {};
+    const int w = req.format.width;
+    const int h = grain_height(req);
+    const bool flash = flash_of(req);
+    const std::size_t size = static_cast<std::size_t>(v210_line_stride(w)) * h;
+    // Patterns that do not move are rendered once per writer thread and then copied:
+    // converting every pixel again costs about one core per 1080p50 output.
+    struct Cached {
+        VideoPattern pattern = VideoPattern::SmpteRp219;
+        bool pluge = false;
+        int w = 0, h = 0;
+        std::vector<std::uint8_t> v210;
+        std::shared_ptr<const void> token;
+    };
+    thread_local Cached cache[2];  // one per flash state (av_sync alternates)
+    Cached& c = cache[flash ? 1 : 0];
+    if (!(c.v210.size() == size && c.pattern == req.pattern && c.pluge == req.pluge && c.w == w && c.h == h)) {
+        c.v210.assign(size, 0);
+        render_raster(req, w, h, flash, c.v210.data());
+        c.pattern = req.pattern;
+        c.pluge = req.pluge;
+        c.w = w;
+        c.h = h;
+        c.token = std::make_shared<int>(0);  // new content, new identity
+    }
+    return {c.v210.data(), c.token};
+}
+
+void render_pattern(const PatternRequest& req, std::uint8_t* v210) {
+    const StillFrame still = still_pattern(req);
+    if (still.data) {
+        std::memcpy(v210, still.data, static_cast<std::size_t>(v210_line_stride(req.format.width)) * grain_height(req));
+        return;
+    }
+    render_raster(req, req.format.width, grain_height(req), flash_of(req), v210);
 }
 
 }  // namespace mtp

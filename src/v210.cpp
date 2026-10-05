@@ -129,6 +129,9 @@ void composite_rgba_onto_v210(std::uint8_t* v210, int width, int height, int x0,
     // Text and boxes repeat one colour with varying alpha: convert a colour once, not per pixel.
     std::uint32_t last_rgb = 0xFFFFFFFFu;
     Yuv10 over{};
+    // The same doubles as (alpha / 255.0) * opacity, without a division per pixel.
+    double alpha_of[256];
+    for (int v = 0; v < 256; ++v) alpha_of[v] = (v / 255.0) * opacity;
     for (int row = 0; row < bh; ++row) {
         const int dy = y0 + row;
         if (dy < 0 || dy >= height) continue;
@@ -155,7 +158,7 @@ void composite_rgba_onto_v210(std::uint8_t* v210, int width, int height, int x0,
             const int dx = x0 + col;
             if (dx < 0 || dx >= width) continue;
             const std::uint8_t* p = rgba + (static_cast<std::size_t>(row) * static_cast<std::size_t>(bw) + col) * 4u;
-            const double a = (p[3] / 255.0) * opacity;
+            const double a = alpha_of[p[3]];
             if (a <= 0.001) continue;
             const std::uint32_t rgb = p[0] | (static_cast<std::uint32_t>(p[1]) << 8) | (static_cast<std::uint32_t>(p[2]) << 16);
             if (rgb != last_rgb) {
@@ -180,6 +183,21 @@ void composite_rgba_onto_v210(std::uint8_t* v210, int width, int height, int x0,
             w[2] = v(cr[c + 1]) | (v(y[x + 3]) << 10) | (v(cb[c + 2]) << 20);
             w[3] = v(y[x + 4]) | (v(cr[c + 2]) << 10) | (v(y[x + 5]) << 20);
         }
+    }
+}
+
+void restore_v210_rect(std::uint8_t* dst, const std::uint8_t* src, int width, int height, int x, int y, int bw, int bh) {
+    const int xa = std::max(0, x);
+    const int xb = std::min(width, x + bw);
+    const int ya = std::max(0, y);
+    const int yb = std::min(height, y + bh);
+    if (bw <= 0 || bh <= 0 || xa >= xb || ya >= yb) return;
+    const std::size_t stride = v210_line_stride(width);
+    const std::size_t b0 = static_cast<std::size_t>(xa / 6) * 16;
+    const std::size_t b1 = static_cast<std::size_t>((xb + 5) / 6) * 16;
+    for (int row = ya; row < yb; ++row) {
+        const std::size_t at = static_cast<std::size_t>(row) * stride;
+        std::memcpy(dst + at + b0, src + at + b0, b1 - b0);
     }
 }
 
