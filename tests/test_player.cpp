@@ -152,6 +152,22 @@ TEST_CASE("burn-in composite touches only the groups under the box, same pixels 
     }
 }
 
+TEST_CASE("the integer blend of opaque layers equals the double formula") {
+    // composite_rgba_onto_v210 blends layers with opacity 1 in integers.
+    int mismatches = 0;
+    for (int alpha = 0; alpha < 256; ++alpha) {
+        const double a = (alpha / 255.0) * 1.0;
+        for (int under = 4; under <= 1019; under += 7) {
+            for (int over = 4; over <= 1019; over += 5) {
+                const auto exact = static_cast<std::uint16_t>(under * (1.0 - a) + over * a + 0.5);
+                const auto fast = static_cast<std::uint16_t>((2 * (under * (255 - alpha) + over * alpha) + 255) / 510);
+                mismatches += exact != fast;
+            }
+        }
+    }
+    CHECK(mismatches == 0);
+}
+
 TEST_CASE("restoring the composited boxes gives back the frame under the overlay") {
     // The writer keeps a still source in a grain slot and restores only the overlay's boxes.
     std::uint32_t seed = 11;

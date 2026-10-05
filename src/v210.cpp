@@ -132,6 +132,7 @@ void composite_rgba_onto_v210(std::uint8_t* v210, int width, int height, int x0,
     // The same doubles as (alpha / 255.0) * opacity, without a division per pixel.
     double alpha_of[256];
     for (int v = 0; v < 256; ++v) alpha_of[v] = (v / 255.0) * opacity;
+    const bool opaque_layer = opacity == 1.0;  // text layers: integer blend, same results
     for (int row = 0; row < bh; ++row) {
         const int dy = y0 + row;
         if (dy < 0 || dy >= height) continue;
@@ -167,9 +168,19 @@ void composite_rgba_onto_v210(std::uint8_t* v210, int width, int height, int x0,
             }
             const int i = dx - px0;
             const int c = i / 2;
-            y[i] = static_cast<std::uint16_t>(y[i] * (1.0 - a) + over.y * a + 0.5);
-            cb[c] = static_cast<std::uint16_t>(cb[c] * (1.0 - a) + over.cb * a + 0.5);
-            cr[c] = static_cast<std::uint16_t>(cr[c] * (1.0 - a) + over.cr * a + 0.5);
+            if (opaque_layer) {
+                // a = A/255: v·(1-a) + o·a + 0.5 is N/510 with N odd, never within 1/510 of an
+                // integer, so the double formula truncates to exactly this.
+                const int A = p[3];
+                const int ia = 255 - A;
+                y[i] = static_cast<std::uint16_t>((2 * (y[i] * ia + over.y * A) + 255) / 510);
+                cb[c] = static_cast<std::uint16_t>((2 * (cb[c] * ia + over.cb * A) + 255) / 510);
+                cr[c] = static_cast<std::uint16_t>((2 * (cr[c] * ia + over.cr * A) + 255) / 510);
+            } else {
+                y[i] = static_cast<std::uint16_t>(y[i] * (1.0 - a) + over.y * a + 0.5);
+                cb[c] = static_cast<std::uint16_t>(cb[c] * (1.0 - a) + over.cb * a + 0.5);
+                cr[c] = static_cast<std::uint16_t>(cr[c] * (1.0 - a) + over.cr * a + 0.5);
+            }
             dirty = true;
         }
         if (!dirty) continue;
