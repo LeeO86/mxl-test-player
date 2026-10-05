@@ -121,7 +121,9 @@ void Library::load_index() {
         it.crossfade_ms = el.value("crossfade_ms", 0);
         it.map_channels = el.value("map_channels", 0);
         it.conversions = el.value("conversions", json::object());
-        if (!it.id.empty()) items_.push_back(std::move(it));
+        // Before 1.0.3 a re-import appended the same id again; keep the first entry.
+        const bool known = std::any_of(items_.begin(), items_.end(), [&](const LibraryItem& o) { return o.id == it.id; });
+        if (!it.id.empty() && !known) items_.push_back(std::move(it));
     }
     bytes_ = dir_bytes(cfg_.library_dir);
 }
@@ -224,6 +226,18 @@ LibraryItem Library::ingest_file(const std::string& path, const std::string& nam
 
     LibraryItem it;
     it.id = uuid_v5(uuid_namespace_dns(), path + "|" + name + "|" + std::to_string(fs::file_size(path))).str();
+    {
+        // The same file again (the import directory is scanned at every start): keep the item
+        // and its conversions. Adding it again listed it twice and converted it again, and an
+        // output playing it read the mezzanine while ffmpeg rewrote it.
+        std::lock_guard lock(mu_);
+        for (const auto& existing : items_) {
+            if (existing.id != it.id) continue;
+            const auto st = existing.conversions.value(format.name, json::object()).value("status", "");
+            if (st != "ready") enqueue(existing.id, format);
+            return existing;
+        }
+    }
     it.name = name.empty() ? fs::path(path).stem().string() : name;
     it.type = type;
     it.fit = options.value("fit", "fit");

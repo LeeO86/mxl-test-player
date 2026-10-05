@@ -48,6 +48,8 @@ public:
     void patch(const nlohmann::json& body);
     void seek(std::int64_t frame);
     void set_master(const std::string& sender_id, bool enabled);
+    // The library changed (a conversion finished): media that was not ready is loaded again.
+    void library_changed();
     std::vector<std::uint8_t> thumbnail() const;
     std::vector<float> meters() const;
     OutputIds ids() const;

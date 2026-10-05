@@ -842,6 +842,14 @@ void Output::command(const std::string& action) {
     if (cb) cb();
 }
 
+void Output::library_changed() {
+    std::lock_guard lock(mu_);
+    const auto media = published_.load();
+    const SourceDesc& src = load_override_ ? load_src_ : source_;
+    // Only an output still waiting for its item: one that plays loaded media keeps it.
+    if ((src.type == "video" || src.type == "still") && !src.item_id.empty() && (!media || !media->ready)) media_gen_++;
+}
+
 void Output::set_source(const SourceDesc& src) {
     std::function<void()> cb;
     {

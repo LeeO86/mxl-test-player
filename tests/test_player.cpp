@@ -4,6 +4,7 @@
 #include "conform.hpp"
 #include "format.hpp"
 #include "ids.hpp"
+#include "media.hpp"
 #include "motion.hpp"
 #include "nmos.hpp"
 #include "mxl_io.hpp"
@@ -194,6 +195,32 @@ TEST_CASE("restoring the composited boxes gives back the frame under the overlay
     // Moving patterns have no still frame.
     req.pattern = VideoPattern::Motion;
     CHECK(still_pattern(req).data == nullptr);
+}
+
+TEST_CASE("importing the same file again keeps one library item") {
+    const auto dir = std::filesystem::temp_directory_path() / "mtp-library-unit";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir / "import");
+    const auto file = (dir / "import" / "clip.bin").string();
+    std::ofstream(file, std::ios::binary) << "not really a clip";
+    Config cfg;
+    cfg.library_dir = (dir / "library").string();
+    const VideoFormat fmt = *parse_format("1080p50");
+    {
+        Library library(cfg);  // not started: no conversion workers
+        const auto a = library.ingest_file(file, "clip.bin", nlohmann::json::object(), fmt);
+        const auto b = library.ingest_file(file, "clip.bin", nlohmann::json::object(), fmt);  // the next start's scan
+        CHECK(a.id == b.id);
+        CHECK(library.list().size() == 1);
+    }
+    // An index written by 1.0.2 with the item repeated loads it once.
+    const std::string entry = R"({"id":"33768ac9-a3ae-5d23-883d-52ce5b159dfb","name":"clip","type":"video","conversions":{}})";
+    std::filesystem::create_directories(dir / "library2");
+    std::ofstream(dir / "library2" / "index.json") << "[" << entry << "," << entry << "," << entry << "]";
+    cfg.library_dir = (dir / "library2").string();
+    Library reloaded(cfg);
+    CHECK(reloaded.list().size() == 1);
+    std::filesystem::remove_all(dir);
 }
 
 TEST_CASE("v210 pack roundtrip and legal black") {
