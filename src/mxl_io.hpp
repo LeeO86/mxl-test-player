@@ -39,7 +39,7 @@ enum class FlowKind { Video, Audio, Data, Key };
 
 class MxlFlow {
 public:
-    MxlFlow() = default;
+    MxlFlow();
     ~MxlFlow();
     MxlFlow(const MxlFlow&) = delete;
     MxlFlow& operator=(const MxlFlow&) = delete;

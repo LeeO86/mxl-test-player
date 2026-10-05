@@ -116,6 +116,8 @@ struct MxlFlow::OpenGrain {
     bool open = false;
 };
 
+MxlFlow::MxlFlow() = default;
+
 MxlFlow::~MxlFlow() {
     if (writer_) log_warn("MxlFlow destroyed while open");
 }
