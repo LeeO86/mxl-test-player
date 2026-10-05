@@ -4,6 +4,7 @@
 #include "uuid_util.hpp"
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -54,12 +55,19 @@ public:
     bool write_audio(std::uint64_t sample_index, const float* planar, int channels, int count);
     bool write_data(std::uint64_t index, const std::uint8_t* data, std::size_t size);
 
+    // Opens grain `index` to be written in place: returns its payload and size, or nullptr.
+    // commit_grain() must follow.
+    std::uint8_t* open_grain(std::uint64_t index, std::size_t& size);
+    bool commit_grain();
+
     std::uint64_t current_index(Rational rate) const;
 
 private:
+    struct OpenGrain;
     std::string id_;
     void* writer_ = nullptr;
     int channels_ = 0;
+    std::unique_ptr<OpenGrain> open_;
 };
 
 std::string video_flow_json(const Uuid& id, const std::string& label, const std::string& group, const char* role, const VideoFormat& fmt,

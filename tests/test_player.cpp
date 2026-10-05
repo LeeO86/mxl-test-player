@@ -24,6 +24,7 @@
 #include <filesystem>
 #include <fstream>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 using namespace mtp;
@@ -278,6 +279,26 @@ TEST_CASE("sine level and ident cadence") {
     CHECK(bursts(planar.data(), 48000) >= 1);
     CHECK(bursts(planar.data() + 48000, 48000) >= 2);
     CHECK(bursts(planar.data() + 2 * 48000, 48000) >= 3);
+}
+
+TEST_CASE("tones keep their exact phase at TAI sample indexes") {
+    // About 2026 in TAI samples: sin(2π·f·t) with t in seconds would lose the phase here.
+    const std::uint64_t start = 84'000'000'000'000ull + 12345;
+    for (const auto& [freq, cycle_num, cycle_den] :
+         {std::tuple<double, std::uint64_t, std::uint64_t>{1000.0, 1000, 48000}, {997.0, 997, 48000}, {997.5, 1995, 96000}}) {
+        AudioProgram prog = make_uniform_program(1, AudioSignal::Sine, freq, 0);
+        std::vector<float> audio(960);
+        render_audio(prog, start, 960, false, audio.data());
+        double worst = 0;
+        for (int i = 0; i < 960; ++i) {
+            // Exact phase in integers: frac(freq·s/48000) = (num·s mod den) / den.
+            const std::uint64_t s = start + static_cast<std::uint64_t>(i);
+            const auto p = static_cast<unsigned __int128>(cycle_num) * s % cycle_den;
+            const double expected = std::sin(2.0 * 3.141592653589793 * static_cast<double>(p) / static_cast<double>(cycle_den));
+            worst = std::max(worst, std::fabs(expected - static_cast<double>(audio[static_cast<std::size_t>(i)])));
+        }
+        CHECK(worst < 1e-6);
+    }
 }
 
 TEST_CASE("drop frame timecode and anc roundtrip") {

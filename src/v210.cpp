@@ -126,6 +126,9 @@ void composite_rgba_onto_v210(std::uint8_t* v210, int width, int height, int x0,
     std::vector<std::uint16_t> y(static_cast<std::size_t>(groups) * 6);
     std::vector<std::uint16_t> cb(static_cast<std::size_t>(groups) * 3);
     std::vector<std::uint16_t> cr(static_cast<std::size_t>(groups) * 3);
+    // Text and boxes repeat one colour with varying alpha: convert a colour once, not per pixel.
+    std::uint32_t last_rgb = 0xFFFFFFFFu;
+    Yuv10 over{};
     for (int row = 0; row < bh; ++row) {
         const int dy = y0 + row;
         if (dy < 0 || dy >= height) continue;
@@ -154,7 +157,11 @@ void composite_rgba_onto_v210(std::uint8_t* v210, int width, int height, int x0,
             const std::uint8_t* p = rgba + (static_cast<std::size_t>(row) * static_cast<std::size_t>(bw) + col) * 4u;
             const double a = (p[3] / 255.0) * opacity;
             if (a <= 0.001) continue;
-            const Yuv10 over = rgb_to_yuv709(p[0] / 255.0, p[1] / 255.0, p[2] / 255.0);
+            const std::uint32_t rgb = p[0] | (static_cast<std::uint32_t>(p[1]) << 8) | (static_cast<std::uint32_t>(p[2]) << 16);
+            if (rgb != last_rgb) {
+                over = rgb_to_yuv709(p[0] / 255.0, p[1] / 255.0, p[2] / 255.0);
+                last_rgb = rgb;
+            }
             const int i = dx - px0;
             const int c = i / 2;
             y[i] = static_cast<std::uint16_t>(y[i] * (1.0 - a) + over.y * a + 0.5);

@@ -24,6 +24,34 @@ namespace {
 
 namespace fs = std::filesystem;
 
+// A grain opened to be rendered in place. `direct` when its payload has the expected size;
+// otherwise the frame is rendered into a buffer and copied in at commit, as before.
+struct GrainTarget {
+    MxlFlow* flow = nullptr;
+    std::uint8_t* payload = nullptr;
+    std::size_t size = 0;
+    bool direct = false;
+
+    void open(MxlFlow& f, std::uint64_t index, std::size_t expected) {
+        payload = f.open_grain(index, size);
+        if (!payload) return;
+        flow = &f;
+        direct = size == expected;
+    }
+    bool opened() const { return flow != nullptr; }
+    // `a` then `b` are copied in unless they were rendered in place.
+    bool commit(const std::uint8_t* a, std::size_t a_bytes, const std::uint8_t* b = nullptr, std::size_t b_bytes = 0) {
+        if (!direct) {
+            const std::size_t na = std::min(a_bytes, size);
+            std::memcpy(payload, a, na);
+            const std::size_t nb = b ? std::min(b_bytes, size - na) : 0;
+            if (nb > 0) std::memcpy(payload + na, b, nb);
+            if (na + nb < size) std::memset(payload + na + nb, 0, size - na - nb);
+        }
+        return flow->commit_grain();
+    }
+};
+
 std::string hostname() {
     const char* announced = std::getenv("NMOS_HOST_ADDRESS");
     if (announced && *announced) return announced;
@@ -289,6 +317,23 @@ void Output::writer_main() {
     // Two frame buffers, reused: one may be the published thumbnail frame while
     // the other is rendered. A new 5.5 MB buffer per grain cost a zero fill each.
     std::shared_ptr<Frame> frames[2];
+    // Packed once per format and copied: packing every line per grain was a cost of its own.
+    std::vector<std::uint8_t> black;
+    int black_w = 0;
+    int black_h = 0;
+    auto fill_black = [&](std::uint8_t* dst, int w, int h) {
+        if (w != black_w || h != black_h) {
+            black.assign(v210_size(w, h), 0);
+            fill_v210(black.data(), w, h, kYBlack, kCMid, kCMid);
+            black_w = w;
+            black_h = h;
+        }
+        std::memcpy(dst, black.data(), black.size());
+    };
+    std::vector<std::uint8_t> key_idle;  // the idle key frame
+    int key_idle_y = -1;
+    std::vector<std::uint8_t> key_buf;   // the key, unless it is rendered into its grain
+    std::vector<std::uint8_t> a10_buf;   // the v210a alpha plane, unless rendered into the grain
     while (!stop_) {
         OutputConfig cfg;
         SourceDesc src;
@@ -397,11 +442,49 @@ void Output::writer_main() {
         if (!frame) frame = std::make_shared<Frame>();  // both held by thumbnail readers
         std::vector<std::uint8_t>& full = frame->v210;
         if (full.size() != full_bytes) full.assign(full_bytes, 0);
-        // Key and alpha planes only exist when keying is on (each is a full-frame write per grain).
-        std::vector<std::uint8_t> key(cfg.key_mode != KeyMode::Off ? full_bytes : 0);
-        std::vector<std::uint8_t> a10(cfg.key_mode == KeyMode::V210a ? alpha10_size(fmt.width, fmt.height) : 0);
+        const bool write_v = master_v_.load();
+        const bool write_a = master_a_.load();
+        const bool write_d = master_d_.load() && cfg.anc;
+        const bool write_k = master_k_.load() && cfg.key_mode == KeyMode::FillKey;
+        const bool v210a = cfg.key_mode == KeyMode::V210a;
+        const std::size_t a10_bytes = v210a ? alpha10_size(fmt.width, fmt.height) : 0;
+        // A progressive grain is rendered straight into the MXL grain (the fill, then the v210a
+        // alpha plane), and the fill_key key into the key grain: copying every rendered frame into
+        // its grain was most of the writer's time. Interlaced grains are fields cut from `full`.
+        GrainTarget video_grain;
+        GrainTarget key_grain_target;
+        std::uint8_t* fill = full.data();
+        if (write_v && flows_open_ && !inter) {
+            video_grain.open(video_, idx, full_bytes + a10_bytes);
+            if (video_grain.direct) fill = video_grain.payload;
+        }
+        // Key and alpha planes only exist when keying is on. The idle key frame is packed once.
         const int key_y = cfg.idle_key == IdleKey::Transparent ? cfg.key_min : cfg.key_max;
-        if (!key.empty()) fill_v210(key.data(), fmt.width, fmt.height, key_y, kCMid, kCMid);
+        std::uint8_t* key = nullptr;
+        if (cfg.key_mode != KeyMode::Off) {
+            if (key_idle.size() != full_bytes || key_idle_y != key_y) {
+                key_idle.assign(full_bytes, 0);
+                fill_v210(key_idle.data(), fmt.width, fmt.height, key_y, kCMid, kCMid);
+                key_idle_y = key_y;
+            }
+            key_buf.resize(full_bytes);
+            key = key_buf.data();
+            if (write_k && flows_open_ && !inter) {
+                key_grain_target.open(key_, idx, full_bytes);
+                if (key_grain_target.direct) key = key_grain_target.payload;
+            }
+            std::memcpy(key, key_idle.data(), full_bytes);
+        }
+        std::uint8_t* a10 = nullptr;
+        if (v210a) {
+            if (video_grain.direct) {
+                a10 = video_grain.payload + full_bytes;
+            } else {
+                a10_buf.resize(a10_bytes);
+                a10 = a10_buf.data();
+            }
+            std::memset(a10, 0, a10_bytes);
+        }
         bool keyed_still = false;
         std::string item_name;
         if (idle || src.type == "pattern" || !media->ready) {
@@ -413,27 +496,27 @@ void Output::writer_main() {
                 req.frame_index = static_cast<std::uint64_t>(std::max<std::int64_t>(0, media_frame));
                 req.field = -1;
                 req.flash = (src.sync_beep || src.pattern == "av_sync") && is_sync_frame(req.frame_index, fmt.frame_rate);
-                render_pattern(req, full.data());
+                render_pattern(req, fill);
             } else {
-                fill_v210(full.data(), fmt.width, fmt.height, kYBlack, kCMid, kCMid);
+                fill_black(fill, fmt.width, fmt.height);
                 // Not ready yet means the loader is still decoding. Keep black on time;
                 // that wait is not an underrun.
             }
         } else if (media->still) {
             keyed_still = true;
-            if (media->still_fill.size() == full.size()) std::memcpy(full.data(), media->still_fill.data(), full.size());
-            else fill_v210(full.data(), fmt.width, fmt.height, kYBlack, kCMid, kCMid);
-            if (media->still_key.size() == key.size()) std::memcpy(key.data(), media->still_key.data(), key.size());
-            if (media->still_a10.size() == a10.size()) std::memcpy(a10.data(), media->still_a10.data(), a10.size());
+            if (media->still_fill.size() == full_bytes) std::memcpy(fill, media->still_fill.data(), full_bytes);
+            else fill_black(fill, fmt.width, fmt.height);
+            if (key && media->still_key.size() == full_bytes) std::memcpy(key, media->still_key.data(), full_bytes);
+            if (a10 && media->still_a10.size() == a10_bytes) std::memcpy(a10, media->still_a10.data(), a10_bytes);
             item_name = media->name;
         } else if (media->ram && media->clip.frames > 0) {
             const std::int64_t f = std::clamp<std::int64_t>(media_frame, 0, media->clip.frames - 1);
-            const std::size_t off = static_cast<std::size_t>(f) * full.size();
-            if (off + full.size() <= media->clip.v210.size()) std::memcpy(full.data(), media->clip.v210.data() + off, full.size());
-            else fill_v210(full.data(), fmt.width, fmt.height, kYBlack, kCMid, kCMid);
+            const std::size_t off = static_cast<std::size_t>(f) * full_bytes;
+            if (off + full_bytes <= media->clip.v210.size()) std::memcpy(fill, media->clip.v210.data() + off, full_bytes);
+            else fill_black(fill, fmt.width, fmt.height);
             item_name = media->name;
         } else {
-            fill_v210(full.data(), fmt.width, fmt.height, kYBlack, kCMid, kCMid);
+            fill_black(fill, fmt.width, fmt.height);
         }
 
         PlaceholderVars vars;
@@ -498,29 +581,28 @@ void Output::writer_main() {
                 of.sprites[i].h = sprites_[i].h;
             }
         }
-        overlay.apply(full.data(), (cfg.key_mode != KeyMode::Off) ? key.data() : nullptr, of);
+        overlay.apply(fill, key, of);
 
-        // An interlaced grain is one field; a progressive grain is the frame itself (no copy).
-        std::vector<std::uint8_t> field_grain;
-        std::vector<std::uint8_t> field_key;
-        if (inter) {
-            field_grain.resize(v210_size(fmt.width, fmt.field_height()));
-            extract_v210_field(full.data(), fmt.width, fmt.height, field, field_grain.data());
-            if (!key.empty()) {
-                field_key.resize(field_grain.size());
-                extract_v210_field(key.data(), fmt.width, fmt.height, field, field_key.data());
-            }
-        }
-        const std::vector<std::uint8_t>& grain = inter ? field_grain : full;
-        const std::vector<std::uint8_t>& key_grain = inter ? field_key : key;
-        const bool write_v = master_v_.load();
-        const bool write_a = master_a_.load();
-        const bool write_d = master_d_.load() && cfg.anc;
-        const bool write_k = master_k_.load() && cfg.key_mode == KeyMode::FillKey;
+        // A thumbnail frame is published every 5th grain; rendered in place, it is copied out
+        // of the grain only when thumbnail() asked for one.
+        const bool publish_thumb = (idx % 5) == 0 && (!video_grain.direct || thumb_wanted_.exchange(false));
+        if (publish_thumb && video_grain.direct) std::memcpy(full.data(), fill, full_bytes);
+
         bool late = false;
-        if (write_v && flows_open_) {
-            if (cfg.key_mode == KeyMode::V210a) {
-                std::vector<std::uint8_t> both = grain;
+        if (video_grain.opened()) {
+            late = !video_grain.commit(full.data(), full_bytes, a10, a10_bytes);
+        } else if (write_v && flows_open_ && !inter && !v210a) {
+            late = !video_.write_video(idx, full.data(), full_bytes); // the grain did not open: fails the same way
+        } else if (write_v && flows_open_) {
+            // An interlaced grain is one field cut from the frame.
+            std::vector<std::uint8_t> grain;
+            if (inter) {
+                grain.resize(v210_size(fmt.width, fmt.field_height()));
+                extract_v210_field(full.data(), fmt.width, fmt.height, field, grain.data());
+            } else {
+                grain.assign(full.begin(), full.end());
+            }
+            if (v210a) {
                 const int gh = inter ? fmt.field_height() : fmt.height;
                 const std::size_t asz = alpha10_size(fmt.width, gh);
                 std::vector<std::uint8_t> apart(asz);
@@ -528,20 +610,26 @@ void Output::writer_main() {
                     const std::uint32_t stride = alpha10_line_stride(fmt.width);
                     int o = 0;
                     for (int y = field & 1; y < fmt.height; y += 2) {
-                        if (static_cast<std::size_t>(y + 1) * stride <= a10.size())
-                            std::memcpy(apart.data() + static_cast<std::size_t>(o) * stride, a10.data() + static_cast<std::size_t>(y) * stride, stride);
+                        if (static_cast<std::size_t>(y + 1) * stride <= a10_bytes)
+                            std::memcpy(apart.data() + static_cast<std::size_t>(o) * stride, a10 + static_cast<std::size_t>(y) * stride, stride);
                         ++o;
                     }
-                } else if (a10.size() >= asz) {
-                    std::memcpy(apart.data(), a10.data(), asz);
+                } else if (a10_bytes >= asz) {
+                    std::memcpy(apart.data(), a10, asz);
                 }
-                both.insert(both.end(), apart.begin(), apart.end());
-                late = !video_.write_video(idx, both.data(), both.size());
-            } else {
-                late = !video_.write_video(idx, grain.data(), grain.size());
+                grain.insert(grain.end(), apart.begin(), apart.end());
             }
+            late = !video_.write_video(idx, grain.data(), grain.size());
         }
-        if (write_k && flows_open_) key_.write_video(idx, key_grain.data(), key_grain.size());
+        if (key_grain_target.opened()) {
+            key_grain_target.commit(key_buf.data(), full_bytes);
+        } else if (write_k && flows_open_ && !inter) {
+            key_.write_video(idx, key, full_bytes);
+        } else if (write_k && flows_open_) {
+            std::vector<std::uint8_t> field_key(v210_size(fmt.width, fmt.field_height()));
+            extract_v210_field(key, fmt.width, fmt.height, field, field_key.data());
+            key_.write_video(idx, field_key.data(), field_key.size());
+        }
 
         const int channels = cfg.audio_channels;
         const std::uint32_t count = samples_in_grain(idx, gr);
@@ -585,7 +673,7 @@ void Output::writer_main() {
         grains_++;
         last_index = idx;
         have_last = true;
-        if ((idx % 5) == 0) {
+        if (publish_thumb) {
             frame->width = fmt.width;
             frame->height = fmt.height;
             frame->index = idx;
@@ -794,6 +882,16 @@ void Output::set_master(const std::string& sender_id, bool enabled) {
 }
 
 std::vector<std::uint8_t> Output::thumbnail() const {
+    // The writer copies a frame for the thumbnail at its next 5th grain; wait for it briefly.
+    thumb_wanted_.store(true);
+    for (int i = 0; i < 20; ++i) {
+        const auto f = thumb_frame_.load();
+        {
+            std::lock_guard lock(thumb_mu_);
+            if (f && f->index != thumb_index_) break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
     const auto frame = thumb_frame_.load();
     std::lock_guard lock(thumb_mu_);
     if (frame && frame->index != thumb_index_ && frame->v210.size() == v210_size(frame->width, frame->height)) {

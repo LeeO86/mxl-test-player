@@ -111,8 +111,34 @@ void MxlSession::remove_own_domain() {
     domain_.clear();
 }
 
+struct MxlFlow::OpenGrain {
+    mxlGrainInfo info{};
+    bool open = false;
+};
+
 MxlFlow::~MxlFlow() {
     if (writer_) log_warn("MxlFlow destroyed while open");
+}
+
+std::uint8_t* MxlFlow::open_grain(std::uint64_t index, std::size_t& size) {
+    size = 0;
+    if (!writer_) return nullptr;
+    if (!open_) open_ = std::make_unique<OpenGrain>();
+    std::uint8_t* payload = nullptr;
+    open_->info = mxlGrainInfo{};
+    const auto st = mxlFlowWriterOpenGrain(static_cast<mxlFlowWriter>(writer_), index, &open_->info, &payload);
+    if (st != MXL_STATUS_OK || !payload) return nullptr;
+    open_->open = true;
+    size = open_->info.grainSize;
+    return payload;
+}
+
+bool MxlFlow::commit_grain() {
+    if (!writer_ || !open_ || !open_->open) return false;
+    open_->open = false;
+    open_->info.flags = 0;
+    open_->info.validSlices = open_->info.totalSlices;
+    return mxlFlowWriterCommitGrain(static_cast<mxlFlowWriter>(writer_), &open_->info) == MXL_STATUS_OK;
 }
 
 void MxlFlow::open(MxlSession& session, const std::string& flow_json) {

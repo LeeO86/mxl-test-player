@@ -28,6 +28,21 @@ float pink_at(std::uint64_t sample, int ch) {
     return acc * 0.35f;
 }
 
+// sin(2π·freq·sample/48000) for an absolute (TAI) sample index. The plain argument is about
+// 1e13 radians: double resolves it only to about 0.002 rad, and libm needs its slow range
+// reduction for every sample. The phase is reduced to [0, 1) cycles first: the integer part
+// of the frequency adds whole cycles every second.
+double tone(double freq, std::uint64_t sample) {
+    const std::uint64_t seconds = sample / 48000u;
+    const std::uint64_t rest = sample % 48000u;
+    const double fraction = freq - std::floor(freq);
+    double cycles = fraction * static_cast<double>(seconds);
+    cycles -= std::floor(cycles);
+    cycles += freq * static_cast<double>(rest) / kSr;
+    cycles -= std::floor(cycles);
+    return std::sin(2.0 * kPi * cycles);
+}
+
 }  // namespace
 
 AudioSignal parse_audio_signal(std::string_view s) {
@@ -107,10 +122,10 @@ void render_audio(const AudioProgram& prog, std::uint64_t start, int count, bool
                     break;
                 case AudioSignal::Sine:
                 case AudioSignal::IdentFreq:
-                    v = std::sin(2.0 * kPi * ch.frequency * t);
+                    v = tone(ch.frequency, s);
                     break;
                 case AudioSignal::IdentEbu: {
-                    v = std::sin(2.0 * kPi * ch.frequency * t);
+                    v = tone(ch.frequency, s);
                     if (c == 0) {
                         // Left channel interrupted: 0.5 s tone, 0.5 s silence.
                         if (static_cast<int>(t) % 2 == 1 && (t - std::floor(t)) < 0.5) {
@@ -135,7 +150,7 @@ void render_audio(const AudioProgram& prog, std::uint64_t start, int count, bool
                     const double slot = beep + gap;
                     const int which = static_cast<int>(p / slot);
                     const double in = p - which * slot;
-                    if (which < n && in < beep) v = std::sin(2.0 * kPi * 1000.0 * t);
+                    if (which < n && in < beep) v = tone(1000.0, s);
                     break;
                 }
                 case AudioSignal::Pink:
