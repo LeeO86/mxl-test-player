@@ -48,6 +48,8 @@ public:
     void patch(const nlohmann::json& body);
     void seek(std::int64_t frame);
     void set_master(const std::string& sender_id, bool enabled);
+    // The library changed (a conversion finished): media that was not ready is loaded again.
+    void library_changed();
     std::vector<std::uint8_t> thumbnail() const;
     std::vector<float> meters() const;
     OutputIds ids() const;
@@ -150,6 +152,7 @@ private:
         std::uint64_t index = 0;
     };
     std::atomic<std::shared_ptr<const Frame>> thumb_frame_;
+    mutable std::atomic<bool> thumb_wanted_{false};  // grains rendered in place are copied out only on request
     mutable std::mutex thumb_mu_;
     mutable std::vector<std::uint8_t> thumb_;
     mutable std::uint64_t thumb_index_ = 0;

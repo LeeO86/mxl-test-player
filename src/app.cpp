@@ -763,7 +763,9 @@ App::App(Config cfg) : impl_(new Impl(std::move(cfg))) {
     }
     impl_->load_state();
     for (auto& o : impl_->outputs) o->start();
-    impl_->library.on_change = [this] {};
+    impl_->library.on_change = [this] {
+        for (auto& o : impl_->outputs) o->library_changed();
+    };
     impl_->library.start();
     impl_->nmos.on_master = [this](const std::string& id, bool en) {
         for (auto& o : impl_->outputs) o->set_master(id, en);

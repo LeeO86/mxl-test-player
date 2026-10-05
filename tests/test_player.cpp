@@ -4,6 +4,7 @@
 #include "conform.hpp"
 #include "format.hpp"
 #include "ids.hpp"
+#include "media.hpp"
 #include "motion.hpp"
 #include "nmos.hpp"
 #include "mxl_io.hpp"
@@ -24,6 +25,7 @@
 #include <filesystem>
 #include <fstream>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 using namespace mtp;
@@ -149,6 +151,76 @@ TEST_CASE("burn-in composite touches only the groups under the box, same pixels 
             CHECK(expected == actual);
         }
     }
+}
+
+TEST_CASE("the integer blend of opaque layers equals the double formula") {
+    // composite_rgba_onto_v210 blends layers with opacity 1 in integers.
+    int mismatches = 0;
+    for (int alpha = 0; alpha < 256; ++alpha) {
+        const double a = (alpha / 255.0) * 1.0;
+        for (int under = 4; under <= 1019; under += 7) {
+            for (int over = 4; over <= 1019; over += 5) {
+                const auto exact = static_cast<std::uint16_t>(under * (1.0 - a) + over * a + 0.5);
+                const auto fast = static_cast<std::uint16_t>((2 * (under * (255 - alpha) + over * alpha) + 255) / 510);
+                mismatches += exact != fast;
+            }
+        }
+    }
+    CHECK(mismatches == 0);
+}
+
+TEST_CASE("restoring the composited boxes gives back the frame under the overlay") {
+    // The writer keeps a still source in a grain slot and restores only the overlay's boxes.
+    std::uint32_t seed = 11;
+    auto rnd = [&]() { seed = seed * 1664525u + 1013904223u; return seed >> 8; };
+    const VideoFormat fmt = *parse_format("720p25");
+    PatternRequest req;
+    req.format = fmt;
+    req.pattern = VideoPattern::SmpteRp219;
+    const StillFrame still = still_pattern(req);
+    REQUIRE(still.data != nullptr);
+    CHECK(still_pattern(req).token == still.token);  // the same content keeps its token
+    const std::vector<std::uint8_t> under(still.data, still.data + v210_size(fmt.width, fmt.height));
+    auto frame = under;
+    struct Box { int x, y, w, h; double opacity; };
+    const std::vector<Box> boxes{{100, 3, 301, 20, 1.0}, {-17, -5, 90, 30, 0.6}, {fmt.width - 50, fmt.height - 10, 120, 25, 0.9}, {7, 0, 5, 720, 1.0}};
+    for (const Box& box : boxes) {
+        std::vector<std::uint8_t> rgba(static_cast<std::size_t>(box.w) * box.h * 4);
+        for (auto& v : rgba) v = static_cast<std::uint8_t>(rnd());
+        composite_rgba_onto_v210(frame.data(), fmt.width, fmt.height, box.x, box.y, box.w, box.h, rgba.data(), box.opacity);
+    }
+    CHECK(frame != under);
+    for (const Box& box : boxes) restore_v210_rect(frame.data(), still.data, fmt.width, fmt.height, box.x, box.y, box.w, box.h);
+    CHECK(frame == under);
+    // Moving patterns have no still frame.
+    req.pattern = VideoPattern::Motion;
+    CHECK(still_pattern(req).data == nullptr);
+}
+
+TEST_CASE("importing the same file again keeps one library item") {
+    const auto dir = std::filesystem::temp_directory_path() / "mtp-library-unit";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir / "import");
+    const auto file = (dir / "import" / "clip.bin").string();
+    std::ofstream(file, std::ios::binary) << "not really a clip";
+    Config cfg;
+    cfg.library_dir = (dir / "library").string();
+    const VideoFormat fmt = *parse_format("1080p50");
+    {
+        Library library(cfg);  // not started: no conversion workers
+        const auto a = library.ingest_file(file, "clip.bin", nlohmann::json::object(), fmt);
+        const auto b = library.ingest_file(file, "clip.bin", nlohmann::json::object(), fmt);  // the next start's scan
+        CHECK(a.id == b.id);
+        CHECK(library.list().size() == 1);
+    }
+    // An index written by 1.0.2 with the item repeated loads it once.
+    const std::string entry = R"({"id":"33768ac9-a3ae-5d23-883d-52ce5b159dfb","name":"clip","type":"video","conversions":{}})";
+    std::filesystem::create_directories(dir / "library2");
+    std::ofstream(dir / "library2" / "index.json") << "[" << entry << "," << entry << "," << entry << "]";
+    cfg.library_dir = (dir / "library2").string();
+    Library reloaded(cfg);
+    CHECK(reloaded.list().size() == 1);
+    std::filesystem::remove_all(dir);
 }
 
 TEST_CASE("v210 pack roundtrip and legal black") {
@@ -278,6 +350,26 @@ TEST_CASE("sine level and ident cadence") {
     CHECK(bursts(planar.data(), 48000) >= 1);
     CHECK(bursts(planar.data() + 48000, 48000) >= 2);
     CHECK(bursts(planar.data() + 2 * 48000, 48000) >= 3);
+}
+
+TEST_CASE("tones keep their exact phase at TAI sample indexes") {
+    // About 2026 in TAI samples: sin(2π·f·t) with t in seconds would lose the phase here.
+    const std::uint64_t start = 84'000'000'000'000ull + 12345;
+    for (const auto& [freq, cycle_num, cycle_den] :
+         {std::tuple<double, std::uint64_t, std::uint64_t>{1000.0, 1000, 48000}, {997.0, 997, 48000}, {997.5, 1995, 96000}}) {
+        AudioProgram prog = make_uniform_program(1, AudioSignal::Sine, freq, 0);
+        std::vector<float> audio(960);
+        render_audio(prog, start, 960, false, audio.data());
+        double worst = 0;
+        for (int i = 0; i < 960; ++i) {
+            // Exact phase in integers: frac(freq·s/48000) = (num·s mod den) / den.
+            const std::uint64_t s = start + static_cast<std::uint64_t>(i);
+            const auto p = static_cast<unsigned __int128>(cycle_num) * s % cycle_den;
+            const double expected = std::sin(2.0 * 3.141592653589793 * static_cast<double>(p) / static_cast<double>(cycle_den));
+            worst = std::max(worst, std::fabs(expected - static_cast<double>(audio[static_cast<std::size_t>(i)])));
+        }
+        CHECK(worst < 1e-6);
+    }
 }
 
 TEST_CASE("drop frame timecode and anc roundtrip") {

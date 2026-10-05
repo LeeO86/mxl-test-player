@@ -37,6 +37,19 @@ Status: v1 implemented against draft spec v0.3. Deviations are recorded here, as
   | 16 × 1080p50 pattern, 120 s | 49.95 grains/s, 154 underruns, 8.57 cores | 50.02 grains/s, 0 underruns, 6.87 cores |
 
   The hour-long losses on 2026-10-03 (about 2300 per output) came from builds and benchmarks on the same host: on a quiet host the same image lost 2–4 grains per output in an hour. 2160p50 is now at one core per output; the rest is two 22 MB copies per grain (cached pattern into the frame, frame into the MXL grain).
+- **Lab run 2026-10-05** (same host, 60 s each after 15 s warm-up; 1.0.3 = grains rendered in place, still sources restored only under the burn-in, exact tone phase):
+
+  | Case | 1.0.2 | 1.0.3 |
+  | --- | --- | --- |
+  | 4 × 1080p50 pattern | 1.49 cores | 0.76 cores |
+  | 4 × 1080p50 pattern, v210a | 3.06 cores | 0.79 cores |
+  | 4 × 1080p50 pattern, fill_key | 2.34 cores | 0.79 cores |
+  | 4 × 1080p50 RAM clip | 1.37 cores | 1.03 cores |
+  | 16 × 1080p50 pattern | 6.51 cores, 0 underruns | 3.22 cores, 0 underruns |
+  | 16 × 1080p50 RAM clip | 6.01 cores | 4.69 cores |
+  | 2 × 2160p50 pattern | 1.95 cores, 10 underruns | 0.73 cores, 0 underruns |
+
+  Two instances with the same seed (same flow ids, so the same burn-ins) wrote byte-identical grains for SMPTE RP 219 and EBU bars and for a still with an alpha ramp, in `off`, `v210a` and `fill_key` (`~/mxl-lab/bin/player-eq`). A grain slot of the MXL ring is recognised by its payload address while the flow stays open; the slot map is cleared whenever the flows are opened again. A RAM clip still costs one copy per grain (clip frame into the grain).
 
 ## Build
 

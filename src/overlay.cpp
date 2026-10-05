@@ -121,7 +121,8 @@ const RgbaImage& OverlayRenderer::cached(const std::string& key, const std::stri
     return ins->second;
 }
 
-void OverlayRenderer::apply(std::uint8_t* v210, std::uint8_t* key_v210, const OverlayFrame& frame) {
+void OverlayRenderer::apply(std::uint8_t* v210, std::uint8_t* key_v210, const OverlayFrame& frame, std::vector<DrawnRect>* fill_rects,
+                            std::vector<DrawnRect>* key_rects) {
     const bool keyed = frame.keyed_still;
     if (keyed && !frame.burnin.on_keyed_stills) {
         // Standard burn-ins and text stay off. Moving boxes are drawn on fill
@@ -254,6 +255,8 @@ void OverlayRenderer::apply(std::uint8_t* v210, std::uint8_t* key_v210, const Ov
 
     for (const auto& layer : layers) {
         composite_rgba_onto_v210(v210, fw, fh, layer.x, layer.y, layer.img.w, layer.img.h, layer.img.px.data(), layer.opacity);
+        if (fill_rects) fill_rects->push_back({layer.x, layer.y, layer.img.w, layer.img.h});
+        if (key_v210 && layer.on_key && key_rects) key_rects->push_back({layer.x, layer.y, layer.img.w, layer.img.h});
         if (key_v210 && layer.on_key) {
             // Raise the key where the overlay is opaque.
             RgbaImage white = layer.img;

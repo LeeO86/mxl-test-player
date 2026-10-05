@@ -64,4 +64,8 @@ int alpha_to_key(double a, int key_min = kYBlack, int key_max = kYWhite);
 void composite_rgba_onto_v210(std::uint8_t* v210, int width, int height, int x, int y, int bw, int bh,
                               const std::uint8_t* rgba, double opacity);
 
+// Copies back from `src` every 6-pixel group that composite_rgba_onto_v210 with the same box
+// can change (rows and columns clipped to the frame).
+void restore_v210_rect(std::uint8_t* dst, const std::uint8_t* src, int width, int height, int x, int y, int bw, int bh);
+
 }  // namespace mtp
