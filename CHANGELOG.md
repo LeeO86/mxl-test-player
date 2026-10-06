@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.4
+
+- A new `domain_def.json` carries `description` and `tags`, as BCP-007-03 requires (`id`, `label`, `description`, `tags`). The player wrote only `id` and `label`, and mxl-st2110-gateway 1.0.2 skipped such domains. An existing file is still not rewritten.
+
 ## 1.0.3
 
 Less CPU per output; the same grains as 1.0.2 (compared byte for byte on the lab for patterns and stills in all key modes). Lab host (2× Xeon Gold 6136, 60 s each): 4 × 1080p50 pattern 1.49 → 0.76 cores, with v210a 3.06 → 0.79, with fill_key 2.34 → 0.79; 16 × 1080p50 pattern 6.51 → 3.22 cores; 16 × 1080p50 RAM clip 6.01 → 4.69 cores; 2 × 2160p50 pattern 1.95 cores with 10 underruns → 0.73 cores with none.

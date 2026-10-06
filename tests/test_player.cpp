@@ -559,6 +559,16 @@ TEST_CASE("output domain is created once and not overwritten") {
     const auto def = dir / "domain_def.json";
     const auto opt = dir / "options.json";
     CHECK(std::filesystem::exists(def));
+    {
+        // BCP-007-03 schema: id, label, description and tags are required.
+        std::ifstream def_in(def);
+        nlohmann::json d;
+        def_in >> d;
+        CHECK(d["id"] == "11111111-1111-5111-8111-111111111111");
+        CHECK(d["label"].is_string());
+        CHECK(d["description"].is_string());
+        CHECK(d["tags"].is_object());
+    }
     const auto first = std::filesystem::last_write_time(def);
     const auto opt_first = std::filesystem::last_write_time(opt);
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
