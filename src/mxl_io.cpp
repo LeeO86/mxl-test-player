@@ -62,7 +62,13 @@ std::string ensure_output_domain(const std::string& domain_dir, const std::strin
         }
     } else {
         std::ofstream out(def_path);
-        out << nlohmann::json{{"id", domain_id}, {"label", "MXL Test Player"}}.dump(2) << "\n";
+        // BCP-007-03 requires id, label, description and tags.
+        out << nlohmann::json{{"id", domain_id},
+                              {"label", "MXL Test Player"},
+                              {"description", "Output domain of mxl-test-player"},
+                              {"tags", nlohmann::json::object()}}
+                   .dump(2)
+            << "\n";
         if (!out) throw Error("cannot write " + def_path.string());
     }
     const auto opt_path = fs::path(domain_dir) / "options.json";
