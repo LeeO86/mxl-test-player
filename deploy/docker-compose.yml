@@ -1,14 +1,16 @@
-# Lab demo on the pod (bridge) network. The registry image is the common
-# nmos-cpp example. Query API is registration port + 1. The player announces
+# Lab demo on the pod (bridge) network. The registry is the platform's image
+# (mxl-poc-platform versions.yml) with registry.json. Query API is registration port + 1. The player announces
 # the first non-loopback IPv4 inside the container unless NMOS_HOST_ADDRESS
 # is set to that address.
 services:
+  # rhastie/nmos-cpp:latest no longer starts ("exec: run: not found").
   registry:
-    image: rhastie/nmos-cpp:latest
-    command: ["run"]
+    image: docker.io/gemini2350/nmos-cpp-registry:sha-53481ff@sha256:3c2fa0793ce336e4176487878758efcbd5c61414c5b90433f3758851615f1c91
     environment:
-      RUN_NODE: "false"
-      RUN_REGISTRY: "true"
+      RUN_MQTT: "FALSE"
+      ADVERTISE_MQTT: "FALSE"
+    volumes:
+      - ./registry.json:/home/registry.json:ro
     ports:
       - "3210:3210"
       - "3211:3211"
@@ -47,6 +49,11 @@ services:
       - config:/config
 
 volumes:
+  # MXL wants a tmpfs; mode 1777 because the player runs as uid 1000.
   mxl:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=1g,mode=1777
   library:
   config:
