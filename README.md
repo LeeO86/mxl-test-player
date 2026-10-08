@@ -78,17 +78,25 @@ Precedence is environment, then the JSON file (`--config`, else `PLAYER_CONFIG`,
 | Method | Path |
 | --- | --- |
 | GET | `/livez`, `/readyz`, `/statusz`, `/metrics` |
-| GET | `/api/v1/config`, `/api/v1/config/export` |
+| GET | `/api/v1/info`, `/api/v1/config`, `/api/v1/config/export`, `/api/v1/nmos` |
 | POST | `/api/v1/config/import` |
-| GET, PATCH | `/api/v1/outputs`, `/api/v1/outputs/{id}` |
-| POST | `/api/v1/outputs/{id}/transport/{play,pause,stop,seek}` |
+| GET, PATCH | `/api/v1/outputs`, `/api/v1/outputs/{id}` (also `master_video`, `master_audio`, `master_data`, `master_key`) |
+| POST | `/api/v1/outputs/{id}/transport` (`play`, `pause`, `stop`, `restart`, `step`), `/api/v1/outputs/{id}/seek` |
+| PUT | `/api/v1/outputs/{id}/source`, `/api/v1/outputs/{id}/burnin` |
+| GET | `/api/v1/outputs/{id}/thumbnail`, `/api/v1/outputs/{id}/probe[?index=]`, `/api/v1/library/{id}/thumbnail` |
 | GET, POST, DELETE | `/api/v1/library`, `/api/v1/presets`, `/api/v1/playlists` |
-| POST | `/api/v1/uploads`, `/api/v1/uploads/{id}` |
+| PATCH, POST | `/api/v1/library/{id}` (name, tags), `/api/v1/library/{id}/reconvert` |
+| PUT | `/api/v1/playlists/{id}` |
+| POST, PUT | `/api/v1/uploads`, `/api/v1/uploads/{id}/chunks/{n}`, `/api/v1/uploads/{id}/complete` |
 | GET | `/api/v1/jobs` |
 | WebSocket | `/api/v1/events` on `WEB_PORT` |
 | GET, PATCH | `/x-nmos/node/v1.3/…`, `/x-nmos/connection/v1.1/single/senders/{id}/staged` on `NMOS_PORT` |
 
 `GET /api/v1/config/export` is one JSON document (`version`, informational `deployment`, and `state`). There are no secrets to omit. `POST /api/v1/config/import` restores outputs, presets and playlists. It does not change ports, the registry or the seed. `GET /api/v1/config` remains the live view.
+
+`GET /api/v1/config` also lists every setting with its effective value and origin (`environment`, `file`, `argument` for `--config`, `default`). `GET /api/v1/info` has the version and the MXL revision.
+
+The web UI (tabs Outputs, Source, Burn-ins, Library, Patterns, Playlists, NMOS, Status, Settings) uses only this API. `cd web && PLAYER_API=http://<player>:8130 npm run dev` runs it against a running player.
 
 `/readyz` is 200 when the process is serving and, if a registry is configured, `GET /x-nmos/query/v1.3/nodes/{id}` on the Query API returns 200.
 

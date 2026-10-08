@@ -7,6 +7,7 @@
 #include "media.hpp"
 #include "motion.hpp"
 #include "nmos.hpp"
+#include "output.hpp"
 #include "mxl_io.hpp"
 #include "pattern.hpp"
 #include "placeholders.hpp"
@@ -550,6 +551,53 @@ TEST_CASE("platform settings, aliases and announce address") {
     auto detected = detect_announce_address();
     CHECK(ipv4_literal(detected));
     CHECK(detected.rfind("127.", 0) != 0);
+}
+
+TEST_CASE("a playlist source keeps its entries through the state file") {
+    const auto j = nlohmann::json::parse(R"({"type": "playlist", "playlist_id": "pl", "item_id": "a",
+        "entries": [{"item_id": "a", "loops": 2, "frames": 300}, {"item_id": "b", "loops": 0, "frames": 1}]})");
+    const auto back = source_from_json(source_to_json(source_from_json(j)));
+    REQUIRE(back.entries.size() == 2);
+    CHECK(back.entries[0].item_id == "a");
+    CHECK(back.entries[0].loops == 2);
+    CHECK(back.entries[0].frames == 300);
+    CHECK(back.entries[1].loops == 0);
+    CHECK(back.playlist_id == "pl");
+}
+
+TEST_CASE("every setting lists its value and origin") {
+    const auto file = std::filesystem::path("/tmp/player-origin-unit.json");
+    {
+        std::ofstream f(file);
+        f << R"({"format": "720p25", "nmos_label": "From file", "outputs_count": 3})";
+    }
+    const char* env[] = {"PLAYER_OUTPUTS=2", "NMOS_HOST_ADDRESS=10.1.2.3", "NMOS_SEED=origin-player", nullptr};
+    const auto cfg = load_config(file.string(), env);
+    auto find = [&](const std::string& key) {
+        for (const auto& s : cfg.settings)
+            if (s.key == key) return s;
+        return SettingOrigin{key, "", "missing"};
+    };
+    CHECK(find("PLAYER_OUTPUTS").value == "2");
+    CHECK(find("PLAYER_OUTPUTS").source == "environment");  // the environment wins over the file's 3
+    CHECK(find("PLAYER_FORMAT").value == "720p25");
+    CHECK(find("PLAYER_FORMAT").source == "file");
+    CHECK(find("NMOS_LABEL").value == "From file");
+    CHECK(find("NMOS_LABEL").source == "file");
+    CHECK(find("PLAYER_AUDIO_CHANNELS").value == "16");
+    CHECK(find("PLAYER_AUDIO_CHANNELS").source == "default");
+    CHECK(find("PLAYER_RAM_CLIP_MAX_S").value == "20");
+    CHECK(find("PLAYER_UPLOAD_LIMIT_GB").value == "20");
+    CHECK(find("PLAYER_CONFIG").value == file.string());
+    CHECK(find("PLAYER_CONFIG").source == "argument");
+    CHECK(find("NMOS_QUERY_PORT").value == "3211");
+    CHECK(find("NMOS_TAGS").value == "{}");
+    CHECK(find("WEB_PORT").source == "default");
+    for (const auto& s : cfg.settings) {
+        INFO(s.key);
+        CHECK((s.source == "environment" || s.source == "file" || s.source == "argument" || s.source == "default"));
+    }
+    std::filesystem::remove(file);
 }
 
 TEST_CASE("output domain is created once and not overwritten") {

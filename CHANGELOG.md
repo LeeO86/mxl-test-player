@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.1.0
+
+- New web UI in the look of the other LeeO86 media functions (mxl-replay, mxl-multiviewer, mxl-st2110-gateway, mxl-browser-source): header with node label, format, playing, underrun, sender, conversion, registration and connection pills and the version; banners for a lost API, lost live updates and failed actions; tabs with `#hash` routing; light and dark theme. Every API function has a control:
+  - **Outputs**: per output the picture, source, Play/Pause/Stop, Restart, Step, Loop, position with remaining time (click to seek a video), audio meters, counters, disabled senders, a preset in one click.
+  - **Source**: source type (pattern, video, still, playlist), every video pattern, PLUGE, every audio signal with frequency, level and sync beep, *Save as preset*; output label, format, audio channels, key mode, idle key, ANC flow, timecode source, ATC kind, drop frame, audio while paused, loop. Drafts with Apply and Revert; a warning when the flows are opened again or get new ids.
+  - **Burn-ins**: the standard burn-ins with the label position, up to 8 text layers (text with placeholder chips, position, offset, size, font, colour, opacity, box, outline, shadow) and up to 2 moving boxes (content from the library, path, speed, size, opacity, start, colour, in the key), live while typing.
+  - **Library**: chunked upload (drop or pick, several files) with fit, frame-rate mode, alpha, loudness, crossfade, channel map and tags; conversions with progress and errors; items with thumbnail, original, conversions, options and the outputs using them; search, play on the selected output, edit name and tags, re-convert, delete.
+  - **Patterns** (presets: apply, copy, edit as new, delete, take from an output), **Playlists** (create, rename, add, reorder, loops, hold time of stills, delete, play), **NMOS** (node, registration, every sender and flow, IS-05 master_enable on and off), **Status** (`/livez`, `/readyz`, `/statusz`, underruns of the last minute, read back the newest grain from MXL, library metrics), **Settings** (every setting with value and origin, export with copy and download, import).
+  - Edits are drafts in the page: tab switches, status pushes and WebSocket reconnects do not overwrite them.
+- New API, all additions: `GET /api/v1/info` (version, MXL revision, label, format, outputs); `GET /api/v1/config` lists `settings` with value and origin (`environment`, `file`, `argument`, `default`); `PATCH /api/v1/outputs/{n}` takes `master_video`, `master_audio`, `master_data`, `master_key`; the output status has `position`, `frames`, `pause_audio` and `idle_key`; `GET /api/v1/library/{id}/thumbnail`; `GET /api/v1/outputs/{n}/probe` without `index` reads the grain written two grains ago; `/api/v1/nmos` has `label`, `device_id`, `host_address`, `registered` and the Query API.
+
+### Fixes
+
+- Pause holds the frame on air. It showed the last seek or step point (the first frame after a play), so pausing a clip jumped back.
+- The status `progress` and `remaining_s` follow the playhead (also within a playlist entry). `progress` stayed 0 while playing and `remaining_s` was the clip length.
+- IS-05 `/active` `master_enable` follows the output, also after a restart or an output change (it went back to `true`), and a change over IS-05 is saved to the state file at once.
+- A video that is still loading no longer counts a loop per frame.
+- A playlist on an output comes back after a restart: the state file kept the source without its entries, so the output stayed black. The output status lists the source's `entries`.
+- `PLAYER_CONFIG` and `CONFIG_DIR` choose the configuration file as documented; the process passed `/config/player.json` as if `--config` were given.
+- The state file is written by one thread at a time.
+
 ## 1.0.4
 
 - A new `domain_def.json` carries `description` and `tags`, as BCP-007-03 requires (`id`, `label`, `description`, `tags`). The player wrote only `id` and `label`, and mxl-st2110-gateway 1.0.2 skipped such domains. An existing file is still not rewritten.

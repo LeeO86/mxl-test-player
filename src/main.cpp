@@ -16,7 +16,7 @@ void on_signal(int sig) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::string config_path = "/config/player.json";
+    std::string config_path;  // without --config: PLAYER_CONFIG, else $CONFIG_DIR/player.json
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--config") == 0 && i + 1 < argc) config_path = argv[++i];
         else if (std::strcmp(argv[i], "--help") == 0) {

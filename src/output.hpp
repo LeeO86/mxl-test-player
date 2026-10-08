@@ -129,6 +129,11 @@ private:
     std::atomic<std::uint64_t> loops_{0};
     std::atomic<int> ahead_{0};
     std::atomic<std::uint64_t> ram_bytes_{0};
+    // Written by the writer each grain: the playhead (what pause holds), and the frame within the
+    // current item and the item's length (for the status).
+    std::atomic<std::int64_t> playhead_{0};
+    std::atomic<std::int64_t> position_{0};
+    std::atomic<std::int64_t> length_{0};
     std::thread thread_;
     std::thread loader_;
 

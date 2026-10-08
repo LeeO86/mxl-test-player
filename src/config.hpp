@@ -85,6 +85,14 @@ struct OutputConfig {
     BurnInConfig burnin;
 };
 
+// One effective setting and where it came from: "environment", "file", "argument" (--config)
+// or "default". Listed by GET /api/v1/config.
+struct SettingOrigin {
+    std::string key;
+    std::string value;
+    std::string source;
+};
+
 struct Config {
     VideoFormat format;
     int outputs = 2;
@@ -120,6 +128,7 @@ struct Config {
     std::uint64_t upload_limit_bytes = 20ull << 30;
     int sprite_max_px = 512;
     std::vector<OutputConfig> output_configs;
+    std::vector<SettingOrigin> settings;  // every setting in README order
 };
 
 // env > file > defaults. Throws Error on invalid values (caller exits 78).
