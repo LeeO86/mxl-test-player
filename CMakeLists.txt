@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(mxl-test-player VERSION 1.0.4 LANGUAGES CXX C)
+project(mxl-test-player VERSION 1.1.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -157,6 +157,8 @@ target_link_libraries(player_core
         mxl::mxl
 )
 target_compile_options(player_core PRIVATE -Wall -Wextra -Wno-unused-parameter)
+# GET /api/v1/info reports both.
+target_compile_definitions(player_core PRIVATE PLAYER_VERSION="${PROJECT_VERSION}" PLAYER_MXL_REVISION="${MXL_TAG}")
 
 add_executable(mxl-test-player src/main.cpp)
 target_link_libraries(mxl-test-player PRIVATE player_core)

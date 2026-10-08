@@ -117,6 +117,8 @@ def main():
 
         item = upload(clip)
         item = wait_job(item["id"])
+        thumb = http("GET", f"/api/v1/library/{item['id']}/thumbnail")
+        assert thumb[:2] == b"\xff\xd8", thumb[:16]
         conv = item["conversions"]["720p25"]
         assert conv["status"] == "ready", conv
         assert conv["frames"] >= 1
@@ -133,6 +135,20 @@ def main():
         assert st["underruns"] == settled["underruns"], st
         assert st["loops"] >= 2, st
         assert st["grains"] > settled["grains"] + 20, st
+        assert st["frames"] == conv["frames"], st
+        assert st["pause_audio"] == "silence" and st["idle_key"] == "opaque", st
+        # Pause holds the frame on air (it went back to the last seek point), play goes on from it.
+        http("POST", "/api/v1/outputs/0/seek", {"frame": 2})
+        time.sleep(0.15)
+        http("POST", "/api/v1/outputs/0/transport", {"action": "pause"})
+        held = http("GET", "/api/v1/outputs/0")
+        time.sleep(0.3)
+        again = http("GET", "/api/v1/outputs/0")
+        assert held["transport"] == "pause" and held["position"] == again["position"], (held, again)
+        assert 3 <= held["position"] < conv["frames"], held["position"]
+        http("POST", "/api/v1/outputs/0/transport", {"action": "play"})
+        time.sleep(0.2)
+        assert http("GET", "/api/v1/outputs/0")["position"] != held["position"]
         flow = st["video_flow_id"]
 
         http("PUT", "/api/v1/outputs/0/source", {"preset": "av_sync"})
@@ -178,6 +194,8 @@ def main():
                 break
         assert a["ok"] and b["ok"] and a["anc_ok"] and b["anc_ok"], (a, b)
         assert a["anc_timecode"] != b["anc_timecode"]
+        latest = http("GET", "/api/v1/outputs/0/probe")  # without ?index=: a grain just written
+        assert latest["ok"] and latest["anc_ok"] and latest["index"] > b["index"], latest
 
         still = upload(png)
         still = wait_job(still["id"])

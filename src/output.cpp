@@ -451,11 +451,14 @@ void Output::writer_main() {
                 idle = false;
             }
         }
+        const std::int64_t playhead = media_frame;
+        std::int64_t item_frames = dur;
         if (src.type == "playlist" && !src.entries.empty()) {
             const auto loc = locate_playlist(src.entries, std::max<std::int64_t>(0, media_frame));
             loop_index = loc.loop_index;
             media_frame = loc.frame_in_item;
             const auto& entry = src.entries[static_cast<std::size_t>(loc.entry)];
+            item_frames = std::max<std::int64_t>(1, entry.frames);
             if (media->item_id != entry.item_id) {
                 std::lock_guard lock(mu_);
                 if (load_src_.item_id != entry.item_id) {
@@ -474,6 +477,9 @@ void Output::writer_main() {
             src.type = media->still ? "still" : (media->ready ? "video" : src.type);
             src.item_id = entry.item_id;
         }
+        playhead_ = playhead;
+        position_ = item_frames > 0 ? media_frame : 0;
+        length_ = item_frames;
         if (loop_index != last_loop_index) {
             if (loop_index > last_loop_index) loops_ += static_cast<std::uint64_t>(loop_index - last_loop_index);
             last_loop_index = loop_index;
@@ -767,13 +773,14 @@ nlohmann::json Output::status() const {
     auto media = published_.load();
     if (!media) media = std::make_shared<const Media>();
     const double fps = fmt_.frame_rate.to_double();
+    // Frame within the current item (a video, or a playlist's entry) and the item's length.
+    const std::int64_t length = length_.load();
+    const std::int64_t position = std::clamp<std::int64_t>(position_.load(), 0, std::max<std::int64_t>(0, length - 1));
     double progress = 0;
     double remain = 0;
-    if (media->frames > 1 && fps > 0) {
-        const std::int64_t frame = transport_ == "pause" ? hold_frame_ : 0;
-        progress = media->frames ? static_cast<double>(frame % media->frames) / media->frames : 0;
-        remain = media->frames / fps;
-        (void)frame;
+    if (length > 1 && fps > 0) {
+        progress = static_cast<double>(position) / static_cast<double>(length);
+        remain = static_cast<double>(length - position) / fps;
     }
     return nlohmann::json{{"index", index_},
                           {"label", cfg_.label},
@@ -807,6 +814,10 @@ nlohmann::json Output::status() const {
                           {"ram_bytes", ram_bytes_.load()},
                           {"progress", progress},
                           {"remaining_s", remain},
+                          {"position", length > 1 ? position : 0},
+                          {"frames", length > 1 ? length : 0},
+                          {"pause_audio", cfg_.pause_audio == PauseAudio::HoldTone ? "hold_tone" : "silence"},
+                          {"idle_key", cfg_.idle_key == IdleKey::Transparent ? "transparent" : "opaque"},
                           {"media_ready", media->ready},
                           {"item", media->name}};
 }
@@ -822,6 +833,8 @@ void Output::command(const std::string& action) {
             origin_valid_ = false;
             origin_media_ = hold_frame_;
         } else if (action == "pause") {
+            // Hold the frame on air (it used to show the last seek or step point).
+            if (transport_ == "play") hold_frame_ = playhead_.load();
             transport_ = "pause";
         } else if (action == "stop") {
             transport_ = "stop";
@@ -834,6 +847,7 @@ void Output::command(const std::string& action) {
             hold_frame_ = 0;
             origin_valid_ = false;
         } else if (action == "step") {
+            if (transport_ == "play") hold_frame_ = playhead_.load();
             transport_ = "pause";
             hold_frame_++;
         }
@@ -917,6 +931,11 @@ void Output::patch(const nlohmann::json& body) {
     }
     if (body.contains("idle_key")) cfg_.idle_key = body.at("idle_key").get<std::string>() == "transparent" ? IdleKey::Transparent : IdleKey::Opaque;
     if (body.contains("burnin")) cfg_.burnin = burnin_from_json(body.at("burnin"));
+    // IS-05 master_enable of this output's senders, as PATCH .../staged on NMOS_PORT sets it.
+    if (body.contains("master_video")) master_v_ = body.at("master_video").get<bool>();
+    if (body.contains("master_audio")) master_a_ = body.at("master_audio").get<bool>();
+    if (body.contains("master_data")) master_d_ = body.at("master_data").get<bool>();
+    if (body.contains("master_key")) master_k_ = body.at("master_key").get<bool>();
     if (reopen) {
         ids_ = derive_output_ids(node_, index_, fmt_, cfg_.audio_channels, cfg_.key_mode == KeyMode::V210a);
         config_gen_++;

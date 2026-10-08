@@ -8,6 +8,7 @@
 #include "util.hpp"
 #include "uuid_util.hpp"
 
+#include <mxl/time.h>
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -20,6 +21,13 @@
 #include <sstream>
 #include <thread>
 #include <unistd.h>
+
+#ifndef PLAYER_VERSION
+#define PLAYER_VERSION "dev"
+#endif
+#ifndef PLAYER_MXL_REVISION
+#define PLAYER_MXL_REVISION ""
+#endif
 
 namespace mtp {
 namespace {
@@ -112,6 +120,7 @@ struct App::Impl {
     std::vector<json> playlists;
     std::map<std::string, Upload> uploads;
     std::mutex mu;
+    std::mutex state_mu;  // one writer of the state file at a time (HTTP threads, outputs, IS-05)
     std::atomic<bool> stop{false};
     std::atomic<bool> shut{false};
     std::atomic<int> code{0};
@@ -135,6 +144,7 @@ Output* App::Impl::out(int index) {
 }
 
 void App::Impl::save_state() {
+    std::lock_guard state_lock(state_mu);
     json arr = json::array();
     for (const auto& o : outputs) {
         auto st = o->status();
@@ -203,9 +213,10 @@ void App::Impl::refresh_nmos() {
             flows[id] = std::move(f);
         }
         const auto ids = o->ids();
-        auto push = [&](const Uuid& sender, const Uuid& flow, const Uuid& source, const char* role, const char* format) {
+        auto push = [&](const Uuid& sender, const Uuid& flow, const Uuid& source, const char* role, const char* format, const char* master) {
             NmosSenderState s;
             s.id = sender.str();
+            s.master_enable = st.value(master, true);  // IS-05 /active follows the output, also after a restart
             s.flow_id = flow.str();
             s.source_id = source.str();
             s.label = st.value("label", "") + std::string(" ") + role;
@@ -215,10 +226,11 @@ void App::Impl::refresh_nmos() {
             s.index = o->index();
             m.senders.push_back(std::move(s));
         };
-        push(ids.video_sender, ids.video_flow, ids.video_source, "Video", "urn:x-nmos:format:video");
-        push(ids.audio_sender, ids.audio_flow, ids.audio_source, "Audio", "urn:x-nmos:format:audio");
-        if (st.value("anc", true)) push(ids.data_sender, ids.data_flow, ids.data_source, "Data", "urn:x-nmos:format:data");
-        if (st.value("key_mode", "off") == "fill_key") push(ids.key_sender, ids.key_flow, ids.key_source, "Key", "urn:x-nmos:format:video");
+        push(ids.video_sender, ids.video_flow, ids.video_source, "Video", "urn:x-nmos:format:video", "master_video");
+        push(ids.audio_sender, ids.audio_flow, ids.audio_source, "Audio", "urn:x-nmos:format:audio", "master_audio");
+        if (st.value("anc", true)) push(ids.data_sender, ids.data_flow, ids.data_source, "Data", "urn:x-nmos:format:data", "master_data");
+        if (st.value("key_mode", "off") == "fill_key")
+            push(ids.key_sender, ids.key_flow, ids.key_source, "Key", "urn:x-nmos:format:video", "master_key");
     }
     nmos.update(m);
 }
@@ -393,7 +405,19 @@ void App::Impl::handle(const HttpRequest& req, HttpResponse& res) {
             text(json{{"ok", true}});
             return;
         }
+        if (path == "/api/v1/info" && req.method == "GET") {
+            text(json{{"version", PLAYER_VERSION},
+                      {"mxl_revision", PLAYER_MXL_REVISION},
+                      {"label", cfg.nmos_label},
+                      {"format", cfg.format.name},
+                      {"outputs", cfg.outputs},
+                      {"audio_channels", cfg.audio_channels}});
+            return;
+        }
         if (path == "/api/v1/config" && req.method == "GET") {
+            // Every setting with its effective value and origin (environment, file, argument, default).
+            json settings = json::array();
+            for (const auto& s : cfg.settings) settings.push_back(json{{"key", s.key}, {"value", s.value}, {"source", s.source}});
             text(json{{"format", cfg.format.name},
                       {"outputs", cfg.outputs},
                       {"audio_channels", cfg.audio_channels},
@@ -401,7 +425,8 @@ void App::Impl::handle(const HttpRequest& req, HttpResponse& res) {
                       {"web_port", cfg.web_port},
                       {"nmos_port", cfg.nmos_port},
                       {"domain", cfg.mxl_domain_dir},
-                      {"domain_id", domain_id}});
+                      {"domain_id", domain_id},
+                      {"settings", settings}});
             return;
         }
         if (path == "/api/v1/outputs" && req.method == "GET") {
@@ -482,9 +507,12 @@ void App::Impl::handle(const HttpRequest& req, HttpResponse& res) {
             }
             if (leaf == "probe" && req.method == "GET") {
                 const auto idx_s = query_get(req.query, "index");
-                std::uint64_t index = idx_s.empty() ? 0 : std::strtoull(idx_s.c_str(), nullptr, 10);
                 const auto st = o->status();
                 const auto fmt = o->format();
+                // Without ?index= the grain two grains back, which is written by now.
+                const Rational gr = fmt.grain_rate();
+                mxlRational rate{gr.num, gr.den};
+                std::uint64_t index = idx_s.empty() ? mxlGetCurrentIndex(&rate) - 2 : std::strtoull(idx_s.c_str(), nullptr, 10);
                 auto video = read_grain(mxl, st.value("video_flow_id", ""), index, fmt.width, fmt.interlaced() ? fmt.field_height() : fmt.height, 500);
                 auto anc = read_grain(mxl, st.value("data_flow_id", ""), index, 0, 0, 200);
                 Timecode tc;
@@ -537,6 +565,17 @@ void App::Impl::handle(const HttpRequest& req, HttpResponse& res) {
             }
             if (leaf.empty() && req.method == "GET") {
                 text(library.to_json(library.get(id)));
+                return;
+            }
+            if ((leaf == "thumbnail" || leaf == "thumbnail.jpg") && req.method == "GET") {
+                std::ifstream in(fs::path(library.item_dir(id)) / "thumb.jpg", std::ios::binary);
+                if (!in) {
+                    res.status = 204;  // not converted yet
+                    return;
+                }
+                res.body.assign(std::istreambuf_iterator<char>(in), {});
+                res.content_type = "image/jpeg";
+                res.status = 200;
                 return;
             }
             if (leaf.empty() && req.method == "DELETE") {
@@ -710,6 +749,12 @@ void App::Impl::handle(const HttpRequest& req, HttpResponse& res) {
         }
         if (path == "/api/v1/nmos" && req.method == "GET") {
             text(json{{"node_id", node.str()},
+                      {"device_id", uuid_v5(node, "device").str()},
+                      {"label", cfg.nmos_label},
+                      {"host_address", cfg.nmos_host_address},
+                      {"registered", nmos.registered()},
+                      {"query", cfg.nmos_query_address},
+                      {"query_port", cfg.nmos_query_port},
                       {"registry", cfg.nmos_registry_address},
                       {"registry_port", cfg.nmos_registry_port},
                       {"port", cfg.nmos_port},
@@ -769,6 +814,7 @@ App::App(Config cfg) : impl_(new Impl(std::move(cfg))) {
     impl_->library.start();
     impl_->nmos.on_master = [this](const std::string& id, bool en) {
         for (auto& o : impl_->outputs) o->set_master(id, en);
+        impl_->save_state();  // the enable flags come back after a restart
     };
     impl_->refresh_nmos();
     impl_->nmos.start(impl_->cfg.nmos_registry_address, impl_->cfg.nmos_registry_port, impl_->cfg.nmos_query_address,

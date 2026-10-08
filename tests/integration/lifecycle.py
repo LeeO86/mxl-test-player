@@ -161,6 +161,40 @@ def main():
         else:
             raise SystemExit("readyz did not become 200 after registration")
 
+        # API for the web UI: version, settings with their origin, NMOS state, sender enable.
+        code, body = http("GET", "/api/v1/info")
+        info = json.loads(body)
+        if code != 200 or info.get("label") != "Life" or not info.get("version") or info.get("version") == "dev":
+            raise SystemExit(f"unexpected info {code} {info}")
+        code, body = http("GET", "/api/v1/config")
+        settings = {s["key"]: s for s in json.loads(body).get("settings", [])}
+        if settings.get("NMOS_LABEL", {}).get("source") != "environment" or settings.get("PLAYER_RAM_BUDGET_MB", {}).get("source") != "default":
+            raise SystemExit(f"settings without origin: {settings}")
+        code, body = http("GET", "/api/v1/nmos")
+        node = json.loads(body)
+        if not node.get("registered") or node.get("host_address") != "10.9.8.7" or not node.get("device_id"):
+            raise SystemExit(f"unexpected nmos {node}")
+        code, body = http("PATCH", "/api/v1/outputs/0", {"master_audio": False})
+        out = json.loads(body)
+        if code != 200 or out.get("master_audio") is not False:
+            raise SystemExit(f"master_audio not applied {code} {out}")
+        conn = f"http://127.0.0.1:{NMOS}/x-nmos/connection/v1.1/single/senders"
+        active = json.loads(urllib.request.urlopen(f"{conn}/{out['audio_sender_id']}/active", timeout=2).read())
+        if active.get("master_enable") is not False:
+            raise SystemExit(f"IS-05 active does not follow the output: {active}")
+        req = urllib.request.Request(
+            f"{conn}/{out['video_sender_id']}/staged",
+            data=json.dumps({"master_enable": False, "activation": {"mode": "activate_immediate"}}).encode(),
+            method="PATCH",
+        )
+        req.add_header("Content-Type", "application/json")
+        urllib.request.urlopen(req, timeout=2).read()
+        out = json.loads(http("GET", "/api/v1/outputs/0")[1])
+        saved = json.loads((cfg / "state.json").read_text())["outputs"][0]
+        if out.get("master_video") is not False or saved.get("master_video") is not False or saved.get("master_audio") is not False:
+            raise SystemExit(f"IS-05 disable not applied or not saved: {out.get('master_video')} {saved}")
+        http("PATCH", "/api/v1/outputs/0", {"master_audio": True, "master_video": True})
+
         code, body = http("GET", "/api/v1/config/export")
         if code != 200:
             raise SystemExit(f"export failed {code}")

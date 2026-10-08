@@ -11,6 +11,8 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <map>
+#include <sstream>
+#include <utility>
 
 namespace mtp {
 namespace {
@@ -304,11 +306,14 @@ Config load_config(const std::string& file_path, const char* const* envp) {
         }
     }
     Config c;
+    // Where each setting came from (environment, file, argument or default), for GET /api/v1/config.
+    std::map<std::string, std::string> origin;
     c.config_dir = "/config";
     if (auto e = env_get(env, "CONFIG_DIR"); !e.empty()) c.config_dir = e;
     if (!file_path.empty()) c.config_path = file_path;
     else if (auto e = env_get(env, "PLAYER_CONFIG"); !e.empty()) c.config_path = e;
     else c.config_path = c.config_dir + "/player.json";
+    origin["PLAYER_CONFIG"] = !file_path.empty() ? "argument" : !env_get(env, "PLAYER_CONFIG").empty() ? "environment" : "default";
 
     json file = json::object();
     {
@@ -322,27 +327,35 @@ Config load_config(const std::string& file_path, const char* const* envp) {
             if (!file.is_object()) throw ConfigError("config file must be a JSON object");
         }
     }
+    auto note = [&](const char* envk, bool in_file) {
+        origin[envk] = !env_get(env, envk).empty() ? "environment" : in_file ? "file" : "default";
+    };
     auto pick_str = [&](const char* envk, const char* filek, const std::string& def) {
+        note(envk, file.contains(filek) && file.at(filek).is_string());
         if (auto e = env_get(env, envk); !e.empty()) return e;
         if (file.contains(filek) && file.at(filek).is_string()) return file.at(filek).get<std::string>();
         return def;
     };
     auto pick_int = [&](const char* envk, const char* filek, int def) {
+        note(envk, file.contains(filek) && file.at(filek).is_number_integer());
         if (auto e = env_get(env, envk); !e.empty()) return parse_int(e, envk);
         if (file.contains(filek) && file.at(filek).is_number_integer()) return file.at(filek).get<int>();
         return def;
     };
     auto pick_dbl = [&](const char* envk, const char* filek, double def) {
+        note(envk, file.contains(filek) && file.at(filek).is_number());
         if (auto e = env_get(env, envk); !e.empty()) return parse_double(e, envk);
         if (file.contains(filek) && file.at(filek).is_number()) return file.at(filek).get<double>();
         return def;
     };
     auto pick_bool = [&](const char* envk, const char* filek, bool def) {
+        note(envk, file.contains(filek) && file.at(filek).is_boolean());
         if (auto e = env_get(env, envk); !e.empty()) return parse_bool(e, envk);
         if (file.contains(filek) && file.at(filek).is_boolean()) return file.at(filek).get<bool>();
         return def;
     };
 
+    note("CONFIG_DIR", file.contains("config_dir") && file.at("config_dir").is_string());
     if (env_get(env, "CONFIG_DIR").empty() && file.contains("config_dir") && file.at("config_dir").is_string()) {
         c.config_dir = file.at("config_dir").get<std::string>();
     }
@@ -361,6 +374,7 @@ Config load_config(const std::string& file_path, const char* const* envp) {
     c.mxl_scan_path = pick_str("MXL_DOMAIN_SCAN_PATH", "mxl_scan_path", "/Volumes/mxl");
     c.mxl_domain_dir = pick_str("MXL_OUTPUT_DOMAIN_DIR", "mxl_domain_dir", "");
     c.mxl_domain_id = pick_str("MXL_OUTPUT_DOMAIN_ID", "mxl_domain_id", "");
+    note("MXL_HISTORY_DURATION_NS", file.contains("history_duration_ns") && file.at("history_duration_ns").is_number());
     if (auto e = env_get(env, "MXL_HISTORY_DURATION_NS"); !e.empty()) {
         try {
             std::size_t idx = 0;
@@ -383,6 +397,7 @@ Config load_config(const std::string& file_path, const char* const* envp) {
     if (c.nmos_dns_sd) throw ConfigError("NMOS_DNS_SD=true is not available; this build has no DNS-SD or Avahi. Set NMOS_DNS_SD=false");
     c.nmos_port = pick_int("NMOS_PORT", "nmos_port", 3282);
     c.nmos_seed = pick_str("NMOS_SEED", "nmos_seed", "");
+    note("HOST_ID", false);
     if (c.nmos_seed.empty()) {
         // HOST_ID is a legacy seed prefix, not an address that is announced.
         auto host = env_get(env, "HOST_ID");
@@ -390,6 +405,7 @@ Config load_config(const std::string& file_path, const char* const* envp) {
         c.nmos_seed = host + "-player";
     }
     c.nmos_label = pick_str("NMOS_LABEL", "nmos_label", "MXL Test Player");
+    note("NMOS_TAGS", file.contains("nmos_tags"));
     if (auto e = env_get(env, "NMOS_TAGS"); !e.empty()) {
         try {
             c.nmos_tags = json::parse(e);
@@ -411,12 +427,14 @@ Config load_config(const std::string& file_path, const char* const* envp) {
     require_announce_address(c.nmos_host_address);
     c.shutdown_timeout_s = pick_int("SHUTDOWN_TIMEOUT_S", "shutdown_timeout_s", 10);
     c.web_port = pick_int("WEB_PORT", "web_port", 8130);
+    note("PLAYER_STATE", file.contains("state_path") && file.at("state_path").is_string());
     if (auto e = env_get(env, "PLAYER_STATE"); !e.empty()) c.state_path = e;
     else if (file.contains("state_path") && file.at("state_path").is_string()) c.state_path = file.at("state_path").get<std::string>();
     else c.state_path = c.config_dir + "/state.json";
     c.font_dir = pick_str("PLAYER_FONT_DIR", "font_dir", "");
     c.web_root = pick_str("PLAYER_WEB_ROOT", "web_root", "");
     c.sprite_max_px = pick_int("PLAYER_SPRITE_MAX_PX", "sprite_max_px", 512);
+    note("PLAYER_UPLOAD_LIMIT_GB", file.contains("upload_limit_gb"));
     if (auto e = env_get(env, "PLAYER_UPLOAD_LIMIT_GB"); !e.empty()) {
         c.upload_limit_bytes = static_cast<std::uint64_t>(parse_double(e, "PLAYER_UPLOAD_LIMIT_GB") * (1ull << 30));
     } else if (file.contains("upload_limit_gb")) {
@@ -429,6 +447,49 @@ Config load_config(const std::string& file_path, const char* const* envp) {
         }
     }
     validate(c);
+    auto num = [](double v) {
+        std::ostringstream os;
+        os << v;
+        return os.str();
+    };
+    const auto flag = [](bool v) { return std::string(v ? "true" : "false"); };
+    const std::pair<const char*, std::string> values[] = {
+        {"CONFIG_DIR", c.config_dir},
+        {"PLAYER_CONFIG", c.config_path},
+        {"PLAYER_STATE", c.state_path},
+        {"PLAYER_FORMAT", c.format.name},
+        {"PLAYER_OUTPUTS", std::to_string(c.outputs)},
+        {"PLAYER_AUDIO_CHANNELS", std::to_string(c.audio_channels)},
+        {"PLAYER_LIBRARY_DIR", c.library_dir},
+        {"PLAYER_IMPORT_DIR", c.import_dir},
+        {"PLAYER_CONVERT_CONCURRENCY", std::to_string(c.convert_concurrency)},
+        {"PLAYER_RAM_CLIP_MAX_S", num(c.ram_clip_max_s)},
+        {"PLAYER_RAM_BUDGET_MB", std::to_string(c.ram_budget_mb)},
+        {"PLAYER_PREROLL_FRAMES", std::to_string(c.preroll_frames)},
+        {"PLAYER_FONT_DIR", c.font_dir},
+        {"PLAYER_WEB_ROOT", c.web_root},
+        {"PLAYER_UPLOAD_LIMIT_GB", num(static_cast<double>(c.upload_limit_bytes) / static_cast<double>(1ull << 30))},
+        {"PLAYER_SPRITE_MAX_PX", std::to_string(c.sprite_max_px)},
+        {"MXL_DOMAIN_SCAN_PATH", c.mxl_scan_path},
+        {"MXL_OUTPUT_DOMAIN_DIR", c.mxl_domain_dir},
+        {"MXL_OUTPUT_DOMAIN_ID", c.mxl_domain_id},
+        {"MXL_HISTORY_DURATION_NS", std::to_string(c.history_duration_ns)},
+        {"MXL_CLEANUP_ON_EXIT", flag(c.mxl_cleanup_on_exit)},
+        {"NMOS_REGISTRY_ADDRESS", c.nmos_registry_address},
+        {"NMOS_REGISTRY_PORT", std::to_string(c.nmos_registry_port)},
+        {"NMOS_QUERY_ADDRESS", c.nmos_query_address},
+        {"NMOS_QUERY_PORT", std::to_string(c.nmos_query_port)},
+        {"NMOS_DNS_SD", flag(c.nmos_dns_sd)},
+        {"NMOS_PORT", std::to_string(c.nmos_port)},
+        {"NMOS_SEED", c.nmos_seed},
+        {"NMOS_LABEL", c.nmos_label},
+        {"NMOS_TAGS", c.nmos_tags.dump()},
+        {"NMOS_HOST_ADDRESS", c.nmos_host_address},
+        {"HOST_ID", env_get(env, "HOST_ID")},
+        {"SHUTDOWN_TIMEOUT_S", std::to_string(c.shutdown_timeout_s)},
+        {"WEB_PORT", std::to_string(c.web_port)},
+    };
+    for (const auto& [key, value] : values) c.settings.push_back({key, value, origin.count(key) ? origin[key] : "default"});
     return c;
 }
 
