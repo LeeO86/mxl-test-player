@@ -7,6 +7,7 @@
 #include "media.hpp"
 #include "motion.hpp"
 #include "nmos.hpp"
+#include "output.hpp"
 #include "mxl_io.hpp"
 #include "pattern.hpp"
 #include "placeholders.hpp"
@@ -550,6 +551,18 @@ TEST_CASE("platform settings, aliases and announce address") {
     auto detected = detect_announce_address();
     CHECK(ipv4_literal(detected));
     CHECK(detected.rfind("127.", 0) != 0);
+}
+
+TEST_CASE("a playlist source keeps its entries through the state file") {
+    const auto j = nlohmann::json::parse(R"({"type": "playlist", "playlist_id": "pl", "item_id": "a",
+        "entries": [{"item_id": "a", "loops": 2, "frames": 300}, {"item_id": "b", "loops": 0, "frames": 1}]})");
+    const auto back = source_from_json(source_to_json(source_from_json(j)));
+    REQUIRE(back.entries.size() == 2);
+    CHECK(back.entries[0].item_id == "a");
+    CHECK(back.entries[0].loops == 2);
+    CHECK(back.entries[0].frames == 300);
+    CHECK(back.entries[1].loops == 0);
+    CHECK(back.playlist_id == "pl");
 }
 
 TEST_CASE("every setting lists its value and origin") {

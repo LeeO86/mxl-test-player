@@ -148,6 +148,9 @@ SourceDesc source_from_json(const nlohmann::json& j) {
 }
 
 nlohmann::json source_to_json(const SourceDesc& s) {
+    // The entries too: the state file restores a playlist from them (it came back empty and black).
+    nlohmann::json entries = nlohmann::json::array();
+    for (const auto& e : s.entries) entries.push_back(nlohmann::json{{"item_id", e.item_id}, {"loops", e.loops}, {"frames", e.frames}});
     return nlohmann::json{{"type", s.type},
                           {"pattern", s.pattern},
                           {"pluge", s.pluge},
@@ -156,7 +159,8 @@ nlohmann::json source_to_json(const SourceDesc& s) {
                           {"level_dbfs", s.level_dbfs},
                           {"sync_beep", s.sync_beep},
                           {"item_id", s.item_id},
-                          {"playlist_id", s.playlist_id}};
+                          {"playlist_id", s.playlist_id},
+                          {"entries", entries}};
 }
 
 Output::Output(int index, OutputConfig cfg, VideoFormat platform, MxlSession& mxl, Library& library, Uuid node, std::string font_dir,

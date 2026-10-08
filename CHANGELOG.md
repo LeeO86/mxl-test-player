@@ -17,6 +17,7 @@
 - The status `progress` and `remaining_s` follow the playhead (also within a playlist entry). `progress` stayed 0 while playing and `remaining_s` was the clip length.
 - IS-05 `/active` `master_enable` follows the output, also after a restart or an output change (it went back to `true`), and a change over IS-05 is saved to the state file at once.
 - A video that is still loading no longer counts a loop per frame.
+- A playlist on an output comes back after a restart: the state file kept the source without its entries, so the output stayed black. The output status lists the source's `entries`.
 - `PLAYER_CONFIG` and `CONFIG_DIR` choose the configuration file as documented; the process passed `/config/player.json` as if `--config` were given.
 - The state file is written by one thread at a time.
 
