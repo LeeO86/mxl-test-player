@@ -341,9 +341,18 @@ is kept (configurable retention) so changing the platform format later is possib
   with a sprite picker showing animated previews; all changes live (§5.4).
 - **Playlists**: create/edit/reorder.
 - **NMOS** and **Settings** pages like the siblings.
+- 1.1.0 implements this in the look of the sibling UIs (header pills, banners, `#hash` tabs, light and dark
+  theme): Outputs, Source (source and output settings), Burn-ins, Library, Patterns, Playlists, NMOS (with
+  each sender's IS-05 `master_enable`), Status (probes, underruns, read-back of the newest grain) and Settings
+  (settings with their origin, export, import). Edits are drafts that survive tab switches and reconnects.
 - REST under `/api/v1/…` (outputs, transport, library, uploads, jobs, presets,
   playlists, config, `config/export`, `config/import`), WebSocket `/api/v1/events`;
   `/livez`, `/readyz`, `/statusz`, `/metrics`.
+- Additions for the UI (1.1.0): `GET /api/v1/info` (version, MXL revision, label, format, outputs);
+  `settings` in `GET /api/v1/config` (key, value, origin); `master_video|audio|data|key` in
+  `PATCH /api/v1/outputs/{n}` (the senders' IS-05 `master_enable`); `position`, `frames`, `pause_audio` and
+  `idle_key` in the output status; `GET /api/v1/library/{id}/thumbnail`; `probe` without `index` reads the
+  newest grain; `/api/v1/nmos` with label, device id, address and registration state.
 - `GET /api/v1/config/export` returns version 1 JSON: informational deployment
   fields plus operator state (outputs, presets, playlists). There are no secrets.
   `POST /api/v1/config/import` restores that operator state. It does not change

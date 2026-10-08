@@ -441,7 +441,8 @@ void Output::writer_main() {
             else if (transport == "stop") media_frame = 0;
             else media_frame = origin_media_ + std::max<std::int64_t>(0, delta);
         }
-        const std::int64_t dur = (src.type == "video" && media->frames > 0) ? media->frames : 0;
+        // A video that is still loading has no length yet (it counted a loop per frame).
+        const std::int64_t dur = (src.type == "video" && media->ready && media->frames > 0) ? media->frames : 0;
         if (dur > 0 && transport == "play") {
             if (loop) {
                 loop_index = media_frame / dur;
