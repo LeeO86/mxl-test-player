@@ -427,6 +427,12 @@ Config load_config(const std::string& file_path, const char* const* envp) {
     require_announce_address(c.nmos_host_address);
     c.shutdown_timeout_s = pick_int("SHUTDOWN_TIMEOUT_S", "shutdown_timeout_s", 10);
     c.web_port = pick_int("WEB_PORT", "web_port", 8130);
+    c.widget_frame_ancestors = pick_str("WIDGET_FRAME_ANCESTORS", "widget_frame_ancestors", "'self'");
+    if (c.widget_frame_ancestors.find_first_not_of(' ') == std::string::npos) c.widget_frame_ancestors = "'self'";
+    // One CSP directive's source list: a ';' or ',' would start another directive or policy.
+    for (const unsigned char ch : c.widget_frame_ancestors)
+        if (ch < 0x20 || ch == 0x7f || ch == ';' || ch == ',')
+            throw ConfigError("WIDGET_FRAME_ANCESTORS must be a CSP source list, e.g. 'self' https://designer.example");
     note("PLAYER_STATE", file.contains("state_path") && file.at("state_path").is_string());
     if (auto e = env_get(env, "PLAYER_STATE"); !e.empty()) c.state_path = e;
     else if (file.contains("state_path") && file.at("state_path").is_string()) c.state_path = file.at("state_path").get<std::string>();
@@ -488,6 +494,7 @@ Config load_config(const std::string& file_path, const char* const* envp) {
         {"HOST_ID", env_get(env, "HOST_ID")},
         {"SHUTDOWN_TIMEOUT_S", std::to_string(c.shutdown_timeout_s)},
         {"WEB_PORT", std::to_string(c.web_port)},
+        {"WIDGET_FRAME_ANCESTORS", c.widget_frame_ancestors},
     };
     for (const auto& [key, value] : values) c.settings.push_back({key, value, origin.count(key) ? origin[key] : "default"});
     return c;

@@ -121,6 +121,7 @@ struct Config {
     std::string nmos_host_address;
     int shutdown_timeout_s = 10;
     int web_port = 8130;
+    std::string widget_frame_ancestors = "'self'";  // CSP frame-ancestors of /widget/*, CORS origins of /widgets
     std::string config_path = "/config/player.json";
     std::string state_path = "/config/state.json";
     std::string font_dir;

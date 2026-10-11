@@ -7,6 +7,7 @@
 #include "output.hpp"
 #include "util.hpp"
 #include "uuid_util.hpp"
+#include "widgets.hpp"
 
 #include <mxl/time.h>
 #include <nlohmann/json.hpp>
@@ -281,6 +282,13 @@ json App::Impl::metrics() const {
 }
 
 void App::Impl::handle(const HttpRequest& req, HttpResponse& res) {
+    if (widget_path(req.path)) {
+        // The widget page is the UI's index.html; main.js mounts the widget for /widget/ paths.
+        std::ifstream in(fs::path(web_root) / "index.html", std::ios::binary);
+        std::string page(std::istreambuf_iterator<char>(in), {});
+        widget_response(cfg, req, page.empty() ? "<!doctype html><title>mxl-test-player</title><p>The web UI was not found.</p>" : page, res);
+        return;
+    }
     if (req.method == "OPTIONS") {
         res.status = 204;
         return;

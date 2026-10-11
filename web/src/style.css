@@ -14,8 +14,9 @@
   --live: #d9483b;
   font-size: 15px;
 }
+/* A widget's theme=dark|light|transparent (data-theme) overrides the browser's; transparent keeps the dark colours. */
 @media (prefers-color-scheme: light) {
-  :root {
+  :root:not([data-theme]) {
     --bg: #f3f5f8;
     --panel: #ffffff;
     --panel2: #eef1f5;
@@ -30,6 +31,23 @@
     --live: #c23b2f;
   }
 }
+:root[data-theme="light"] {
+  --bg: #f3f5f8;
+  --panel: #ffffff;
+  --panel2: #eef1f5;
+  --border: #d4dbe3;
+  --text: #1b2430;
+  --muted: #5d6b7a;
+  --accent: #1f6fd1;
+  --ok: #1f8f47;
+  --warn: #a86d00;
+  --bad: #c23b2f;
+  --chip: #e6ebf1;
+  --live: #c23b2f;
+  color-scheme: light;
+}
+:root[data-theme="dark"] { color-scheme: dark; }
+:root[data-theme="transparent"] { --bg: transparent; }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
 header { display: flex; align-items: center; gap: .4rem 1rem; padding: .7rem 1.2rem; background: var(--panel); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
@@ -195,6 +213,15 @@ td.actions-cell .btn + .btn { margin-left: .3rem; }
 .statusline .bad { color: var(--bad); font-weight: 600; }
 .quick { display: flex; gap: .5rem; align-items: center; margin-top: .6rem; }
 .quick select { flex: 1; min-width: 0; }
+
+/* Widget (/widget/transport): fills the frame */
+.widget-root { position: relative; height: 100vh; display: flex; flex-direction: column; gap: .45rem; padding: .5rem; overflow: hidden auto; }
+.widget-root > .empty { padding: .6rem; }
+.widget-root .srcline, .widget-root .position { margin: 0; }
+.widget-head { display: flex; align-items: center; gap: .5rem; min-width: 0; }
+.widget-head .name { font-weight: 700; font-size: .9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.widget-head .fmt { color: var(--muted); font-size: .8rem; }
+.widget-error { position: absolute; left: .5rem; right: .5rem; bottom: .5rem; padding: .3rem .5rem; border-radius: 5px; background: var(--bad); color: #fff; font-size: .78rem; font-weight: 600; cursor: pointer; }
 
 /* Source, burn-ins: editor left, picture right */
 .editor { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: .9rem; align-items: start; }

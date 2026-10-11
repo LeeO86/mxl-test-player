@@ -54,6 +54,7 @@ const DESCRIPTIONS = {
   HOST_ID: "Seed prefix when NMOS_SEED is empty.",
   SHUTDOWN_TIMEOUT_S: "Bound for the SIGTERM cleanup.",
   WEB_PORT: "This UI, the API, probes and metrics.",
+  WIDGET_FRAME_ANCESTORS: "Pages that may frame the widgets (CSP frame-ancestors), e.g. 'self' https://designer.example.",
 };
 const ORIGIN = {
   environment: { text: "ENV", cls: "env" },

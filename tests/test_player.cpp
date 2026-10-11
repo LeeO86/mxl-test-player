@@ -16,6 +16,7 @@
 #include "timecode.hpp"
 #include "uuid_util.hpp"
 #include "v210.hpp"
+#include "widgets.hpp"
 
 #include <doctest.h>
 #include <nlohmann/json.hpp>
@@ -598,6 +599,83 @@ TEST_CASE("every setting lists its value and origin") {
         CHECK((s.source == "environment" || s.source == "file" || s.source == "argument" || s.source == "default"));
     }
     std::filesystem::remove(file);
+}
+
+TEST_CASE("WIDGET_FRAME_ANCESTORS defaults to 'self' and must be one source list") {
+    const char* plain[] = {"NMOS_SEED=widget-player", "NMOS_HOST_ADDRESS=10.1.2.3", nullptr};
+    auto cfg = load_config("", plain);
+    CHECK(cfg.widget_frame_ancestors == "'self'");
+    const char* set[] = {"NMOS_SEED=widget-player", "NMOS_HOST_ADDRESS=10.1.2.3", "WIDGET_FRAME_ANCESTORS='self' https://designer.example", nullptr};
+    cfg = load_config("", set);
+    CHECK(cfg.widget_frame_ancestors == "'self' https://designer.example");
+    bool listed = false;
+    for (const auto& s : cfg.settings)
+        if (s.key == "WIDGET_FRAME_ANCESTORS") listed = s.value == "'self' https://designer.example" && s.source == "environment";
+    CHECK(listed);
+    const char* semicolon[] = {"NMOS_SEED=widget-player", "NMOS_HOST_ADDRESS=10.1.2.3", "WIDGET_FRAME_ANCESTORS='self'; script-src *", nullptr};
+    CHECK_THROWS_AS(load_config("", semicolon), Error);
+    const char* comma[] = {"NMOS_SEED=widget-player", "NMOS_HOST_ADDRESS=10.1.2.3", "WIDGET_FRAME_ANCESTORS=https://a.example, https://b.example", nullptr};
+    CHECK_THROWS_AS(load_config("", comma), Error);
+}
+
+TEST_CASE("widgets: the list with CORS for listed origins, the page with CSP frame-ancestors") {
+    Config cfg;
+    cfg.outputs = 2;
+    cfg.widget_frame_ancestors = "'self' https://designer.example";
+    auto get = [&](const std::string& path, const std::string& query = "", const std::string& origin = "", const std::string& method = "GET") {
+        HttpRequest req;
+        req.method = method;
+        req.path = path;
+        req.query = query;
+        if (!origin.empty()) req.headers["origin"] = origin;
+        HttpResponse res;
+        widget_response(cfg, req, "<!doctype html><title>ui</title>", res);
+        return res;
+    };
+    auto header = [](const HttpResponse& res, const std::string& key) { return res.headers.count(key) ? res.headers.at(key) : std::string("(none)"); };
+
+    auto list = get("/widgets", "", "https://designer.example");
+    CHECK(list.status == 200);
+    CHECK_FALSE(list.cors);
+    CHECK(header(list, "Access-Control-Allow-Origin") == "https://designer.example");
+    CHECK(header(list, "Vary") == "Origin");
+    const auto body = nlohmann::json::parse(std::string(list.body.begin(), list.body.end()));
+    REQUIRE(body.is_array());
+    REQUIRE(body.size() == 1);
+    CHECK(body[0]["id"] == "transport");
+    CHECK(body[0]["min_size"] == nlohmann::json{{"w", 420}, {"h", 160}});
+    CHECK(body[0]["params"]["properties"]["output"]["minimum"] == 1);
+    CHECK(body[0]["params"]["properties"]["output"]["maximum"] == 2);
+    CHECK(body[0]["params"]["required"] == nlohmann::json::array({"output"}));
+    CHECK_FALSE(body[0]["version"].get<std::string>().empty());
+    auto other = get("/widgets", "", "https://evil.example");
+    CHECK(other.status == 200);
+    CHECK(header(other, "Access-Control-Allow-Origin") == "(none)");
+    CHECK(header(other, "Vary") == "Origin");
+    CHECK(header(get("/widgets"), "Access-Control-Allow-Origin") == "(none)");
+    auto post = get("/widgets", "", "", "POST");
+    CHECK(post.status == 405);
+    CHECK(header(post, "Allow") == "GET");
+    CHECK(get("/widgets", "", "", "OPTIONS").status == 405);
+    CHECK(get("/widget/transport", "output=1", "", "POST").status == 405);
+
+    auto page = get("/widget/transport", "output=2&theme=transparent");
+    CHECK(page.status == 200);
+    CHECK_FALSE(page.cors);
+    CHECK(page.content_type.rfind("text/html", 0) == 0);
+    CHECK(std::string(page.body.begin(), page.body.end()) == "<!doctype html><title>ui</title>");
+    CHECK(header(page, "Content-Security-Policy") == "frame-ancestors 'self' https://designer.example");
+    CHECK(header(page, "X-Frame-Options") == "(none)");
+    CHECK(get("/widget/transport", "theme=light&output=1").status == 200);
+    CHECK(get("/widget/transport").status == 400);
+    CHECK(get("/widget/transport", "output=0").status == 400);
+    CHECK(get("/widget/transport", "output=3").status == 400);
+    CHECK(get("/widget/transport", "output=x").status == 400);
+    CHECK(get("/widget/transport", "output=1&theme=pink").status == 400);
+    CHECK(get("/widget/clips", "output=1").status == 404);
+    CHECK(widget_path("/widgets"));
+    CHECK(widget_path("/widget/transport"));
+    CHECK_FALSE(widget_path("/api/v1/outputs"));
 }
 
 TEST_CASE("output domain is created once and not overwritten") {
