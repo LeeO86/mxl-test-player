@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.2.0
+
+Operator-screen widgets, as in mxl-webrtc-monitor 1.3.0, mxl-replay 1.4.0 and mxl-color-corrector 1.1.0 (`SPECIFICATION.md` §9.1):
+
+- `GET /widgets` lists one widget, `transport` (`output`: 1..`PLAYER_OUTPUTS`, required, 1 is Out 1; `min_size` 420×160). GET only (405 otherwise). It answers CORS only for an `Origin` that `WIDGET_FRAME_ANCESTORS` lists, with `Vary: Origin`, and not the API's `Access-Control-Allow-Origin: *`.
+- `GET /widget/transport?output=<n>[&theme=dark|light|transparent]` is one output's transport without the app around it, on the player's own API: label, format, state, what it plays (pattern and test audio, item, or playlist and item), Play/Pause/Stop, Restart, Step, Loop, and the position with remaining time (click to seek a video). A bad output or theme answers 400, an unknown widget 404.
+- New setting `WIDGET_FRAME_ANCESTORS` (default `'self'`): the widget pages' `Content-Security-Policy: frame-ancestors`. They send no `X-Frame-Options`. `;`, `,` or control characters exit 78.
+- The page posts `{type: "widget-ready"}` and `{type: "widget-size", w, h}` to the page that frames it.
+- The web UI's asset URLs are absolute (`/assets/…`), so the same `index.html` loads under `/widget/`.
+- A 405 answer carries the reason `Method Not Allowed` (it said `OK`).
+- The Compose and Kubernetes examples use the `1.2.0` image.
+
 ## 1.1.0
 
 - New web UI in the look of the other LeeO86 media functions (mxl-replay, mxl-multiviewer, mxl-st2110-gateway, mxl-browser-source): header with node label, format, playing, underrun, sender, conversion, registration and connection pills and the version; banners for a lost API, lost live updates and failed actions; tabs with `#hash` routing; light and dark theme. Every API function has a control:

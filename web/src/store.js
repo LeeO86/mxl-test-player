@@ -2,7 +2,7 @@
 // second), the lists (library, jobs, presets, playlists), the selected output, the drafts that
 // survive tab switches and reconnects, and the actions every page uses.
 import { computed, reactive } from "vue";
-import { api, canon, clone, formatFps } from "./api.js";
+import { api, canon, clone, formatFps, patternLabel, signalLabel } from "./api.js";
 
 function storedOutput() {
   try {
@@ -34,6 +34,14 @@ export const selectedOutput = computed(() => live.outputs.find((o) => o.index ==
 export const outputLabel = (index) => live.outputs.find((o) => o.index === index)?.label || `Out ${index + 1}`;
 export const itemsById = computed(() => Object.fromEntries(live.library.map((i) => [i.id, i])));
 export const activeJobs = computed(() => live.jobs.filter((j) => j.state === "queued" || j.state === "running"));
+
+/** What an output plays, in one line: the pattern and test audio, the playlist and item, or the item. */
+export function sourceText(o) {
+  const s = o.source || {};
+  if (s.type === "pattern") return `${patternLabel(s.pattern)}${s.pluge ? " + PLUGE" : ""} · ${signalLabel(s.audio)}`;
+  if (s.type === "playlist") return `Playlist ${live.playlists.find((p) => p.id === s.playlist_id)?.name || ""}${o.item ? ` · ${o.item}` : ""}`;
+  return `${s.type === "still" ? "Still" : "Video"} ${o.item || live.library.find((i) => i.id === s.item_id)?.name || ""}`;
+}
 
 export function selectOutput(index) {
   live.selected = index;

@@ -6,7 +6,8 @@ const target = process.env.PLAYER_API || "http://127.0.0.1:8130";
 
 export default defineConfig({
   plugins: [vue()],
-  base: "./",
+  // Absolute asset URLs: /widget/<id> serves the same index.html one level down.
+  base: "/",
   build: { outDir: "dist", assetsDir: "assets" },
   server: { port: 5173, proxy: { "/api": { target, ws: true }, "/metrics": target, "/livez": target, "/readyz": target, "/statusz": target } },
 });

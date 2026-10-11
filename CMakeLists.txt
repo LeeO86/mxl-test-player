@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(mxl-test-player VERSION 1.1.0 LANGUAGES CXX C)
+project(mxl-test-player VERSION 1.2.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -144,6 +144,7 @@ set(PLAYER_SOURCES
     src/nmos.cpp
     src/output.cpp
     src/app.cpp
+    src/widgets.cpp
 )
 
 add_library(player_core STATIC ${PLAYER_SOURCES})

@@ -300,15 +300,18 @@ void HttpServer::serve(int fd) {
     else if (res.status == 204) status_text = "No Content";
     else if (res.status == 400) status_text = "Bad Request";
     else if (res.status == 404) status_text = "Not Found";
+    else if (res.status == 405) status_text = "Method Not Allowed";
     else if (res.status == 409) status_text = "Conflict";
     else if (res.status == 500) status_text = "Error";
     std::ostringstream os;
     os << "HTTP/1.1 " << res.status << " " << status_text << "\r\n";
     os << "Content-Type: " << res.content_type << "\r\n";
     os << "Content-Length: " << res.body.size() << "\r\n";
-    os << "Access-Control-Allow-Origin: *\r\n";
-    os << "Access-Control-Allow-Methods: GET,POST,PUT,PATCH,DELETE,OPTIONS\r\n";
-    os << "Access-Control-Allow-Headers: Content-Type\r\n";
+    if (res.cors) {
+        os << "Access-Control-Allow-Origin: *\r\n";
+        os << "Access-Control-Allow-Methods: GET,POST,PUT,PATCH,DELETE,OPTIONS\r\n";
+        os << "Access-Control-Allow-Headers: Content-Type\r\n";
+    }
     os << "Connection: close\r\n";
     for (const auto& kv : res.headers) os << kv.first << ": " << kv.second << "\r\n";
     os << "\r\n";

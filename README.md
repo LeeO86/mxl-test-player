@@ -60,7 +60,8 @@ Precedence is environment, then the JSON file (`--config`, else `PLAYER_CONFIG`,
 | `NMOS_HOST_ADDRESS` | first non-loopback IPv4 | Address announced to NMOS. Not a name, `0.0.0.0` or loopback |
 | `HOST_ID` | `host` | Legacy seed prefix when `NMOS_SEED` is unset. Not an address |
 | `SHUTDOWN_TIMEOUT_S` | `10` | Bound for SIGTERM cleanup |
-| `WEB_PORT` | `8130` | UI, REST, probes, metrics, and `/api/v1/events` |
+| `WEB_PORT` | `8130` | UI, REST, probes, metrics, `/api/v1/events`, and the widgets |
+| `WIDGET_FRAME_ANCESTORS` | `'self'` | CSP `frame-ancestors` of the `/widget` pages; `/widgets` answers these origins with CORS. `;`, `,` or control characters exit 78 |
 
 `NMOS_HOST_ADDRESS` is the node `href`, `api.endpoints[].host` and the IS-05 control href. `HOST_ID` is not announced. The UI WebSocket is on `WEB_PORT`. This process does not listen on `NMOS_PORT+1`.
 
@@ -90,13 +91,16 @@ Precedence is environment, then the JSON file (`--config`, else `PLAYER_CONFIG`,
 | POST, PUT | `/api/v1/uploads`, `/api/v1/uploads/{id}/chunks/{n}`, `/api/v1/uploads/{id}/complete` |
 | GET | `/api/v1/jobs` |
 | WebSocket | `/api/v1/events` on `WEB_PORT` |
+| GET | `/widgets`, `/widget/transport?output=<n>[&theme=dark\|light\|transparent]` (below) |
 | GET, PATCH | `/x-nmos/node/v1.3/…`, `/x-nmos/connection/v1.1/single/senders/{id}/staged` on `NMOS_PORT` |
 
 `GET /api/v1/config/export` is one JSON document (`version`, informational `deployment`, and `state`). There are no secrets to omit. `POST /api/v1/config/import` restores outputs, presets and playlists. It does not change ports, the registry or the seed. `GET /api/v1/config` remains the live view.
 
 `GET /api/v1/config` also lists every setting with its effective value and origin (`environment`, `file`, `argument` for `--config`, `default`). `GET /api/v1/info` has the version and the MXL revision.
 
-The web UI (tabs Outputs, Source, Burn-ins, Library, Patterns, Playlists, NMOS, Status, Settings) uses only this API. `cd web && PLAYER_API=http://<player>:8130 npm run dev` runs it against a running player.
+The web UI (tabs Outputs, Source, Burn-ins, Library, Patterns, Playlists, NMOS, Status, Settings) uses only this API.
+
+Widgets: operator screens can frame one output's transport. `GET /widgets` lists them as `[{id, title, params, min_size, version}]` (`params` is a JSON schema of the query). `GET /widget/transport?output=<n>` (1 is Out 1; `min_size` 420×160) shows the output's label, format, state and what it plays, with Play/Pause/Stop, Restart, Step, Loop and the position (click to seek a video). The page uses the player's own API and posts `widget-ready` and `widget-size` to its parent. Only the pages that `WIDGET_FRAME_ANCESTORS` names may frame it; on the platform set it to `'self' https://designer.<fqdn>`. `cd web && PLAYER_API=http://<player>:8130 npm run dev` runs it against a running player.
 
 `/readyz` is 200 when the process is serving and, if a registry is configured, `GET /x-nmos/query/v1.3/nodes/{id}` on the Query API returns 200.
 

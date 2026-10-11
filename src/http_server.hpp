@@ -24,6 +24,7 @@ struct HttpResponse {
     std::string content_type = "application/json; charset=utf-8";
     std::map<std::string, std::string> headers;
     std::vector<std::uint8_t> body;
+    bool cors = true;  // the API's Access-Control-Allow-* headers; the widget routes leave them out
     void set_text(const std::string& s, const std::string& type = "application/json; charset=utf-8");
 };
 

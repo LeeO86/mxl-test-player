@@ -195,6 +195,16 @@ def main():
             raise SystemExit(f"IS-05 disable not applied or not saved: {out.get('master_video')} {saved}")
         http("PATCH", "/api/v1/outputs/0", {"master_audio": True, "master_video": True})
 
+        # Widgets through the HTTP server: the list without the API's CORS, the page with its CSP, the refusals.
+        with urllib.request.urlopen(f"http://127.0.0.1:{WEB}/widgets", timeout=2) as res:
+            if json.loads(res.read())[0]["id"] != "transport" or res.headers.get("Access-Control-Allow-Origin"):
+                raise SystemExit("unexpected /widgets")
+        with urllib.request.urlopen(f"http://127.0.0.1:{WEB}/widget/transport?output=1", timeout=2) as res:
+            if res.headers.get("Content-Security-Policy") != "frame-ancestors 'self'" or res.headers.get("X-Frame-Options"):
+                raise SystemExit(f"unexpected widget headers {dict(res.headers)}")
+        if http("POST", "/widgets", {})[0] != 405 or http("GET", "/widget/transport?output=2")[0] != 400:
+            raise SystemExit("widget refusals")
+
         code, body = http("GET", "/api/v1/config/export")
         if code != 200:
             raise SystemExit(f"export failed {code}")

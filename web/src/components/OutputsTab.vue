@@ -7,17 +7,11 @@ import LivePicture from "./LivePicture.vue";
 import Meters from "./Meters.vue";
 import Pill from "./Pill.vue";
 import Transport from "./Transport.vue";
-import { patternLabel, shortId, signalLabel } from "../api.js";
-import { live, selectOutput, setSource } from "../store.js";
+import { shortId } from "../api.js";
+import { live, selectOutput, setSource, sourceText } from "../store.js";
 
 const go = inject("go");
 
-function sourceText(o) {
-  const s = o.source || {};
-  if (s.type === "pattern") return `${patternLabel(s.pattern)}${s.pluge ? " + PLUGE" : ""} · ${signalLabel(s.audio)}`;
-  if (s.type === "playlist") return `Playlist ${live.playlists.find((p) => p.id === s.playlist_id)?.name || ""}${o.item ? ` · ${o.item}` : ""}`;
-  return `${s.type === "still" ? "Still" : "Video"} ${o.item || live.library.find((i) => i.id === s.item_id)?.name || ""}`;
-}
 const disabled = (o) => ["video", "audio", "data", "key"].filter((k) => o[`master_${k}`] === false && (k !== "data" || o.anc) && (k !== "key" || o.key_mode === "fill_key"));
 
 function open(o, tab) {

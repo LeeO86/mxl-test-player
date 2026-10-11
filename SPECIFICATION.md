@@ -363,6 +363,29 @@ is kept (configurable retention) so changing the platform format later is possib
 - Unauthenticated by design (lab network). Upload size limit configurable
   (default 20 GB); the platform ingress must allow it.
 
+### 9.1 Widgets (1.2.0, operator screens)
+
+The contract of mxl-webrtc-monitor 1.3.0, mxl-replay 1.4.0 and mxl-color-corrector 1.1.0.
+
+- `GET /widgets` answers `[{id, title, params, min_size: {w, h}, version}]` (`params` a
+  JSON schema of the query). It carries `Access-Control-Allow-Origin` for an `Origin`
+  that `WIDGET_FRAME_ANCESTORS` lists (or `*`), and `Vary: Origin`, instead of the API's
+  `*`; GET only (405 otherwise).
+- `transport` (`output`, required, 1..`PLAYER_OUTPUTS`: 1 is the first output, API index 0;
+  `min_size` 420×160): one output's label, format and transport state, what it plays
+  (pattern and test audio, item, or playlist and item), Play/Pause/Stop, Restart, Step,
+  Loop, and the position with remaining time (a click seeks a video). The source, burn-ins
+  and output settings stay in the app.
+- `GET /widget/transport?output=<n>[&theme=dark|light|transparent]` is the UI's `index.html`
+  with only that widget, no app chrome, on the player's own API (same origin, WebSocket
+  `/api/v1/events` included). An invalid parameter answers 400, an unknown widget 404. These
+  routes carry `Content-Security-Policy: frame-ancestors <WIDGET_FRAME_ANCESTORS>` and no
+  `X-Frame-Options`.
+- The page posts `{type: "widget-ready"}` once it shows the output, and
+  `{type: "widget-size", w, h}` then and on every resize, to `window.parent`.
+- No video preview: the pictures are JPEG thumbnails, so the platform's preview contract
+  (`PREVIEW_*`) does not apply.
+
 ---
 
 ## 10. Configuration, metrics, deployment
@@ -395,7 +418,8 @@ Configuration (env > file > default; invalid exits 78):
 | `NMOS_TAGS` | `{}` |
 | `NMOS_HOST_ADDRESS` | first non-loopback IPv4. Rejects names, `0.0.0.0` and loopback |
 | `SHUTDOWN_TIMEOUT_S` | 10 |
-| `WEB_PORT` | 8130 (UI, REST, `/api/v1/events`, probes, `/metrics`) |
+| `WEB_PORT` | 8130 (UI, REST, `/api/v1/events`, probes, `/metrics`, widgets) |
+| `WIDGET_FRAME_ANCESTORS` | `'self'`: CSP `frame-ancestors` of the widget pages (§9.1). `;`, `,` or control characters exit 78 |
 
 Unknown environment variables are ignored. A port that cannot be bound exits 75.
 SIGTERM stops ffmpeg children immediately, releases MXL writers, DELETEs the
