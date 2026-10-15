@@ -8,9 +8,11 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <sstream>
+#include <stdexcept>
 
 namespace mtp {
 namespace {
@@ -57,6 +59,29 @@ int http_status(const std::string& response) {
     if (sp == std::string::npos) return 0;
     return std::atoi(response.c_str() + sp + 1);
 }
+
+// The body of an HTTP/1.1 response, with a chunked transfer coding undone.
+std::string http_body(const std::string& response) {
+    const auto end = response.find("\r\n\r\n");
+    if (end == std::string::npos) return {};
+    std::string head = response.substr(0, end);
+    for (auto& c : head) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    std::string body = response.substr(end + 4);
+    if (head.find("transfer-encoding: chunked") == std::string::npos) return body;
+    std::string out;
+    std::size_t pos = 0;
+    while (pos < body.size()) {
+        const auto eol = body.find("\r\n", pos);
+        if (eol == std::string::npos) break;
+        const auto n = std::strtoul(body.substr(pos, eol - pos).c_str(), nullptr, 16);
+        if (n == 0) break;
+        out.append(body, eol + 2, n);
+        pos = eol + 2 + n + 2;
+    }
+    return out;
+}
+
+bool http_ok(int code) { return code >= 200 && code < 300; }
 
 std::string base_href(const NmosModel& m) { return "http://" + m.host + ":" + std::to_string(m.api_port); }
 
@@ -131,6 +156,25 @@ nlohmann::json nmos_sender_json(const NmosModel& m, const NmosSenderState& s, co
             {"subscription", {{"receiver_id", nullptr}, {"active", s.master_enable}}}};
 }
 
+NmosRegistered nmos_resources(const NmosModel& m) {
+    NmosRegistered r;
+    for (const auto& s : m.senders) {
+        r[s.source_id] = "sources";
+        r[s.flow_id] = "flows";
+        r[s.id] = "senders";
+    }
+    return r;
+}
+
+std::vector<std::pair<std::string, std::string>> nmos_stale_resources(const NmosRegistered& registered, const NmosModel& m) {
+    const auto current = nmos_resources(m);
+    std::vector<std::pair<std::string, std::string>> out;
+    for (const char* type : {"senders", "flows", "sources"})
+        for (const auto& [id, t] : registered)
+            if (t == type && !current.count(id)) out.emplace_back(t, id);
+    return out;
+}
+
 std::string NmosNode::version() const {
     const auto now = std::chrono::system_clock::now().time_since_epoch();
     const auto sec = std::chrono::duration_cast<std::chrono::seconds>(now).count();
@@ -139,8 +183,12 @@ std::string NmosNode::version() const {
 }
 
 void NmosNode::update(NmosModel model) {
-    std::lock_guard lock(mu_);
-    model_ = std::move(model);
+    {
+        std::lock_guard lock(mu_);
+        model_ = std::move(model);
+        dirty_ = true;
+    }
+    cv_.notify_all();  // register a changed output now, not at the next heartbeat
 }
 
 void NmosNode::start(const std::string& registry_host, int registry_port, const std::string& query_host, int query_port) {
@@ -154,14 +202,22 @@ void NmosNode::start(const std::string& registry_host, int registry_port, const 
 }
 
 void NmosNode::stop() {
-    stop_ = true;
+    {
+        std::lock_guard lock(mu_);
+        stop_ = true;
+    }
+    cv_.notify_all();
     if (reg_.joinable()) reg_.join();
 }
 
 bool NmosNode::registry_configured() const { return !registry_host_.empty(); }
 
 void NmosNode::deregister() {
-    stop_ = true;
+    {
+        std::lock_guard lock(mu_);
+        stop_ = true;
+    }
+    cv_.notify_all();
     if (reg_.joinable()) reg_.join();
     std::string node_id;
     {
@@ -184,11 +240,18 @@ bool NmosNode::master_enabled(const std::string& sender_id) const {
 }
 
 void NmosNode::registry_loop(std::string host, int port) {
+    // What this node has registered, so a resource the model drops is DELETEd. A POST
+    // only adds or updates: without this, an output's old flow (and, before 1.2.1, its
+    // old sender) stayed in the registry after a format change.
+    NmosRegistered registered;
+    bool adopted = false;  // resources of this device from an earlier run (crash, no node DELETE)
+    std::map<std::string, std::chrono::steady_clock::time_point> delete_warned;
     while (!stop_) {
         NmosModel m;
         {
             std::lock_guard lock(mu_);
             m = model_;
+            dirty_ = false;
         }
         if (!m.node_id.empty()) {
             const auto v = version();
@@ -197,16 +260,54 @@ void NmosNode::registry_loop(std::string host, int port) {
                                      nlohmann::json{{"type", type}, {"data", data}}.dump());
             };
             const auto node_resp = post("node", nmos_node_json(m, v));
+            const int posted = http_status(node_resp);
+            if (http_ok(posted) && !adopted && !query_host_.empty()) {
+                // The registry may still hold this node's children from a run that ended
+                // without the node DELETE. Take them over, so the ones not in the model go.
+                // Done only when all three lists came back; otherwise again at the next pass.
+                bool all = true;
+                for (const char* type : {"sources", "flows", "senders"}) {
+                    const auto q = http_exchange(query_host_, query_port_, "GET",
+                                                 std::string("/x-nmos/query/v1.3/") + type + "?device_id=" + m.device_id + "&paging.limit=1000", "");
+                    try {
+                        if (!http_ok(http_status(q))) throw std::runtime_error("status");
+                        const auto list = nlohmann::json::parse(http_body(q));
+                        if (!list.is_array()) throw std::runtime_error("not a list");
+                        for (const auto& r : list)
+                            if (r.is_object() && r.value("device_id", "") == m.device_id && !r.value("id", "").empty())
+                                registered.emplace(r.value("id", ""), type);
+                    } catch (const std::exception&) {
+                        all = false;
+                    }
+                }
+                adopted = all;
+            }
             post("device", nmos_device_json(m, v));
             for (const auto& s : m.senders) {
-                post("source", nmos_source_json(m, s, v));
-                post("flow", nmos_flow_json(m, s, v));
-                post("sender", nmos_sender_json(m, s, v));
+                if (http_ok(http_status(post("source", nmos_source_json(m, s, v))))) registered[s.source_id] = "sources";
+                if (http_ok(http_status(post("flow", nmos_flow_json(m, s, v))))) registered[s.flow_id] = "flows";
+                if (http_ok(http_status(post("sender", nmos_sender_json(m, s, v))))) registered[s.id] = "senders";
+            }
+            // The senders now point at their current flows: remove what the model no longer has.
+            for (const auto& [type, id] : nmos_stale_resources(registered, m)) {
+                const int code = http_status(http_exchange(host, port, "DELETE", "/x-nmos/registration/v1.3/resource/" + type + "/" + id, ""));
+                if (http_ok(code) || code == 404) {
+                    registered.erase(id);
+                    delete_warned.erase(id);
+                    log_info("NMOS: deleted " + type.substr(0, type.size() - 1) + " " + id + " (no longer offered)");
+                } else {
+                    // Retried at every pass; warned once a minute per resource.
+                    const auto now = std::chrono::steady_clock::now();
+                    auto it = delete_warned.find(id);
+                    if (it == delete_warned.end() || now - it->second >= std::chrono::minutes(1)) {
+                        delete_warned[id] = now;
+                        log_warn("NMOS: DELETE of " + type + "/" + id + " returned " + std::to_string(code) + ", retrying");
+                    }
+                }
             }
             const auto health = http_exchange(host, port, "POST", "/x-nmos/registration/v1.3/health/nodes/" + m.node_id, "");
-            const int posted = http_status(node_resp);
             const int health_code = http_status(health);
-            bool ok = (posted >= 200 && posted < 300) || (health_code >= 200 && health_code < 300);
+            bool ok = http_ok(posted) || http_ok(health_code);
             if (ok && !query_host_.empty()) {
                 const auto q = http_exchange(query_host_, query_port_, "GET", "/x-nmos/query/v1.3/nodes/" + m.node_id, "");
                 const int qc = http_status(q);
@@ -214,7 +315,9 @@ void NmosNode::registry_loop(std::string host, int port) {
             }
             registered_ = ok;
         }
-        for (int i = 0; i < 50 && !stop_; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        // Heartbeat every 5 s; a model change (update()) or stop() wakes the loop at once.
+        std::unique_lock lock(mu_);
+        cv_.wait_for(lock, std::chrono::seconds(5), [this] { return stop_.load() || dirty_; });
     }
 }
 
@@ -341,7 +444,9 @@ void NmosNode::handle(const HttpRequest& req, HttpResponse& res) {
                         std::lock_guard lock(mu_);
                         for (auto& s : model_.senders)
                             if (s.id == sid) s.master_enable = enable;
+                        dirty_ = true;  // subscription.active goes to the registry now
                     }
+                    cv_.notify_all();
                     if (on_master) on_master(sid, enable);
                 }
                 // Reflect the updated value.

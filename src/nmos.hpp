@@ -6,10 +6,13 @@
 #include <nlohmann/json.hpp>
 
 #include <atomic>
+#include <condition_variable>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace mtp {
@@ -53,6 +56,17 @@ nlohmann::json nmos_source_json(const NmosModel& m, const NmosSenderState& s, co
 nlohmann::json nmos_flow_json(const NmosModel& m, const NmosSenderState& s, const std::string& version);
 nlohmann::json nmos_sender_json(const NmosModel& m, const NmosSenderState& s, const std::string& version);
 
+// Registered resources by id: the Registration API path type ("sources", "flows", "senders").
+using NmosRegistered = std::map<std::string, std::string>;
+
+// The model's sources, flows and senders by id, as NmosRegistered.
+NmosRegistered nmos_resources(const NmosModel& m);
+
+// What is registered but no longer in the model (an output changed its format, dropped
+// its ANC or key flow): {type, id}, senders first, then flows, then sources, so no
+// sender is left pointing at a deleted flow.
+std::vector<std::pair<std::string, std::string>> nmos_stale_resources(const NmosRegistered& registered, const NmosModel& m);
+
 class NmosNode {
 public:
     void update(NmosModel model);
@@ -72,7 +86,9 @@ private:
     mutable std::mutex mu_;
     NmosModel model_;
     std::thread reg_;
-    bool stop_ = false;
+    std::condition_variable cv_;
+    std::atomic<bool> stop_{false};
+    bool dirty_ = false;  // the model changed since the registry loop last posted it
     std::string registry_host_;
     int registry_port_ = 0;
     std::string query_host_;

@@ -8,3 +8,4 @@ web/dist/
 *.so
 compile_commands.json
 .vscode/
+__pycache__/

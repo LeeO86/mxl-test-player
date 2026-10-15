@@ -28,7 +28,9 @@ Uuid node_id_from_seed(std::string_view seed);
 Uuid domain_id_from_seed(std::string_view seed);
 
 // Flow ids include the format (and the video media type) so a format change
-// mints new ids. They do not include the playing source.
+// mints new ids. They do not include the playing source. Source and sender ids
+// depend only on the node, the output index and the role: a format change keeps
+// them, and the sender then points at the new flow.
 OutputIds derive_output_ids(const Uuid& node, int index, const VideoFormat& fmt, int audio_channels, bool v210a);
 
 }  // namespace mtp

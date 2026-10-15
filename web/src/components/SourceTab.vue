@@ -221,7 +221,7 @@ const dirtyField = (k) => (k in setupChanges.value ? "dirty" : "");
           <label class="check"><input v-model="setup.loop" type="checkbox" /> Loop videos</label>
         </div>
         <div v-if="reopens" class="warnbox">
-          {{ newIds ? "The flows get new ids: receivers must be routed again." : "The flows are opened again (same ids)." }}
+          {{ newIds ? "The flows get new ids (the senders keep theirs): receivers must be routed again." : "The flows are opened again (same ids)." }}
         </div>
         <p class="note">
           These apply at once. After a restart the output settings come from the configuration file again; the source, transport, burn-ins and
