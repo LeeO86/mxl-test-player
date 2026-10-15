@@ -30,6 +30,8 @@
 #include <tuple>
 #include <vector>
 
+#include <unistd.h>
+
 using namespace mtp;
 
 TEST_CASE("format parse and interlaced grain rate") {
@@ -552,6 +554,20 @@ TEST_CASE("platform settings, aliases and announce address") {
                            "PLAYER_OUTPUTS=1", nullptr};
     auto aliased = load_config("", alias);
     CHECK(aliased.state_path == "/tmp/legacy-state.json");
+
+    // Neither NMOS_SEED nor HOST_ID: a random seed per CONFIG_DIR, kept there, so two players differ.
+    const auto seed_a = std::filesystem::temp_directory_path() / ("mtp-seed-a-" + std::to_string(::getpid()));
+    const auto seed_b = std::filesystem::temp_directory_path() / ("mtp-seed-b-" + std::to_string(::getpid()));
+    const std::string dir_a = "CONFIG_DIR=" + seed_a.string(), dir_b = "CONFIG_DIR=" + seed_b.string();
+    const char* no_seed_a[] = {dir_a.c_str(), "NMOS_HOST_ADDRESS=10.9.8.7", "PLAYER_FORMAT=1080p50", "PLAYER_OUTPUTS=1", nullptr};
+    const char* no_seed_b[] = {dir_b.c_str(), "NMOS_HOST_ADDRESS=10.9.8.7", "PLAYER_FORMAT=1080p50", "PLAYER_OUTPUTS=1", nullptr};
+    const auto first = load_config("", no_seed_a).nmos_seed;
+    CHECK(first.rfind("player-", 0) == 0);
+    CHECK(first.size() == 23);
+    CHECK(load_config("", no_seed_a).nmos_seed == first);
+    CHECK(load_config("", no_seed_b).nmos_seed != first);
+    std::filesystem::remove_all(seed_a);
+    std::filesystem::remove_all(seed_b);
 
     const char* host_id[] = {"HOST_ID=box-a", "NMOS_HOST_ADDRESS=10.9.8.7", "PLAYER_FORMAT=1080p50", "PLAYER_OUTPUTS=1", nullptr};
     CHECK(load_config("", host_id).nmos_seed == "box-a-player");

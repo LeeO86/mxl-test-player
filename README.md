@@ -54,11 +54,11 @@ Precedence is environment, then the JSON file (`--config`, else `PLAYER_CONFIG`,
 | `NMOS_QUERY_PORT` | registry port + 1 | Query API port |
 | `NMOS_DNS_SD` | `false` | `true` exits 78. No Avahi and no mDNS |
 | `NMOS_PORT` | `3282` | IS-04 node API and IS-05 connection API |
-| `NMOS_SEED` | `$HOST_ID-player` | UUIDv5 root for every id |
+| `NMOS_SEED` | `$HOST_ID-player`; without `HOST_ID` a random `player-…` kept in `CONFIG_DIR/nmos_seed` (the hostname when that is not writable), with a warning | UUIDv5 root for every id. Set it: two players with the same seed share node and device ids and remove each other's resources. Sender, source and flow ids also depend on the output's position (Out 1, Out 2, …), so reordering outputs changes them |
 | `NMOS_LABEL` | `MXL Test Player` | Node label and device label |
 | `NMOS_TAGS` | `{}` | JSON object of tag name to string array |
 | `NMOS_HOST_ADDRESS` | first non-loopback IPv4 | Address announced to NMOS. Not a name, `0.0.0.0` or loopback |
-| `HOST_ID` | `host` | Legacy seed prefix when `NMOS_SEED` is unset. Not an address |
+| `HOST_ID` | unset | Legacy seed prefix when `NMOS_SEED` is unset. Not an address |
 | `SHUTDOWN_TIMEOUT_S` | `10` | Bound for SIGTERM cleanup |
 | `WEB_PORT` | `8130` | UI, REST, probes, metrics, `/api/v1/events`, and the widgets |
 | `WIDGET_FRAME_ANCESTORS` | `'self'` | CSP `frame-ancestors` of the `/widget` pages; `/widgets` answers these origins with CORS. `;`, `,` or control characters exit 78 |

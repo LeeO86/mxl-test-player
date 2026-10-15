@@ -175,16 +175,31 @@ def main():
         prev, cur = step("key off, back to v210", {"key_mode": "off"})
         assert store.deleted[0] == f"senders/{prev['key_sender_id']}", store.deleted
 
-        # A run that ends without the node DELETE, then a start with another format.
+        # IS-05 master_enable reaches the registry's subscription.active at once.
+        sid = outputs()[1]["video_sender_id"]
+        for enable in (False, True):
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{NMOS}/x-nmos/connection/v1.1/single/senders/{sid}/staged",
+                data=json.dumps({"master_enable": enable, "activation": {"mode": "activate_immediate"}}).encode(),
+                method="PATCH",
+            )
+            req.add_header("Content-Type", "application/json")
+            urllib.request.urlopen(req, timeout=2).read()
+            wait_for(f"subscription.active {enable}", lambda: store.snapshot()["senders"][sid]["subscription"]["active"] is enable or "not yet", 2)
+
+        # A run that ends without the node DELETE, then a start with another format,
+        # while the Query API is down at first: the cleanup is tried again.
         left = set(store.snapshot()["flows"])
         del store.deleted[:]
         proc.send_signal(signal.SIGKILL)
         proc.wait(timeout=5)
         assert set(store.snapshot()["flows"]) == left
         env["PLAYER_FORMAT"] = "1080p50"
+        store.fail_lists = 2
         proc = start(env, log)
         wait_for("ready after restart", ready, 20)
-        wait_for("restart registration", lambda: consistent(store, outputs()), 8)
+        wait_for("restart registration", lambda: consistent(store, outputs()), 15)
+        assert store.fail_lists == 0
         now = outputs()
         assert now[0]["format"] == "1080p50" and now[0]["video_sender_id"] == first[0]["video_sender_id"], now[0]
         assert f"flows/{first[0]['video_flow_id']}" in store.deleted, store.deleted

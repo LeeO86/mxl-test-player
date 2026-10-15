@@ -302,7 +302,12 @@ is kept (configurable retention) so changing the platform format later is possib
 - One Node, one Device; per output one video sender and one audio sender (plus
   data and key senders when those flows exist) with Source and Flow. Group hints
   stay `<output label>:Video` / `:Audio` / `:Data` / `:Key`. Every id is UUIDv5
-  from `NMOS_SEED`.
+  from `NMOS_SEED`; sender, source and flow ids also from the output's position
+  (index in the configuration), so reordering outputs changes them. Two players
+  must not share a seed: they would share node and device ids and DELETE each
+  other's resources. Without `NMOS_SEED` and `HOST_ID` the seed is a random
+  `player-<16 hex>` kept in `CONFIG_DIR/nmos_seed` (the hostname when that is not
+  writable), with a warning at start.
 - `NMOS_LABEL` is the node label and the device label. `NMOS_TAGS` (JSON object
   of name to string array) is added to the node and the device.
 - Senders write into the player's own domain only. `domain_def.json` and
@@ -423,7 +428,7 @@ Configuration (env > file > default; invalid exits 78):
 | `NMOS_QUERY_ADDRESS` / `NMOS_QUERY_PORT` | registry address / registry port + 1 |
 | `NMOS_DNS_SD` | false (`true` exits 78) |
 | `NMOS_PORT` | 3282 (node and IS-05; no second listener) |
-| `NMOS_SEED` | `HOST_ID` + `-player` when unset. `HOST_ID` is only this seed alias, never an announced address |
+| `NMOS_SEED` | `HOST_ID` + `-player` when unset. `HOST_ID` is only this seed alias, never an announced address. Without both: a random seed kept in `CONFIG_DIR/nmos_seed`, else the hostname, with a warning |
 | `NMOS_LABEL` | `MXL Test Player` |
 | `NMOS_TAGS` | `{}` |
 | `NMOS_HOST_ADDRESS` | first non-loopback IPv4. Rejects names, `0.0.0.0` and loopback |

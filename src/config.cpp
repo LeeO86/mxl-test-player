@@ -5,13 +5,17 @@
 #include <nlohmann/json.hpp>
 
 #include <cctype>
+#include <array>
+#include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <ifaddrs.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <map>
 #include <sstream>
+#include <unistd.h>
 #include <utility>
 
 namespace mtp {
@@ -295,6 +299,49 @@ void require_announce_address(const std::string& ip) {
     }
 }
 
+// Neither NMOS_SEED nor HOST_ID: a seed of this instance, so two such players do not
+// share node and device ids (and do not delete each other's resources). It is kept in
+// CONFIG_DIR/nmos_seed, so the ids survive a restart; without a writable CONFIG_DIR it
+// is the hostname, unique but new with every new container.
+static std::string fallback_seed(const std::string& config_dir) {
+    namespace fs = std::filesystem;
+    const auto path = fs::path(config_dir) / "nmos_seed";
+    {
+        std::ifstream in(path);
+        std::string kept;
+        if (in >> kept && !kept.empty()) {
+            log_warn("NMOS_SEED is not set: using the seed kept in " + path.string() + " (" + kept + "); set NMOS_SEED for fixed ids");
+            return kept;
+        }
+    }
+    std::array<unsigned char, 8> r{};
+    std::ifstream rnd("/dev/urandom", std::ios::binary);
+    rnd.read(reinterpret_cast<char*>(r.data()), static_cast<std::streamsize>(r.size()));
+    std::string seed = "player-";
+    char hex[3];
+    for (unsigned char b : r) {
+        std::snprintf(hex, sizeof(hex), "%02x", b);
+        seed += hex;
+    }
+    std::error_code ec;
+    fs::create_directories(config_dir, ec);
+    {
+        std::ofstream out(path);
+        out << seed << "\n";
+        out.flush();
+        if (rnd && out) {
+            log_warn("NMOS_SEED is not set: generated seed " + seed + ", kept in " + path.string() + "; set NMOS_SEED for fixed ids");
+            return seed;
+        }
+    }
+    char name[256] = {};
+    if (gethostname(name, sizeof(name) - 1) != 0 || !name[0]) std::snprintf(name, sizeof(name), "host");
+    seed = std::string(name) + "-player";
+    log_warn("NMOS_SEED is not set and " + path.string() + " is not writable: using the hostname seed " + seed +
+             " (new ids with every new container); set NMOS_SEED");
+    return seed;
+}
+
 Config load_config(const std::string& file_path, const char* const* envp) {
     std::map<std::string, std::string> env;
     if (envp) {
@@ -400,9 +447,9 @@ Config load_config(const std::string& file_path, const char* const* envp) {
     note("HOST_ID", false);
     if (c.nmos_seed.empty()) {
         // HOST_ID is a legacy seed prefix, not an address that is announced.
-        auto host = env_get(env, "HOST_ID");
-        if (host.empty()) host = "host";
-        c.nmos_seed = host + "-player";
+        const auto host = env_get(env, "HOST_ID");
+        if (!host.empty()) c.nmos_seed = host + "-player";
+        else c.nmos_seed = fallback_seed(c.config_dir);
     }
     c.nmos_label = pick_str("NMOS_LABEL", "nmos_label", "MXL Test Player");
     note("NMOS_TAGS", file.contains("nmos_tags"));

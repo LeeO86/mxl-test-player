@@ -5,11 +5,14 @@
 ### Fixes
 
 - An output change no longer leaves a stale sender in the NMOS registry. After Out 2 went from `v210` to `v210a`, the registry listed two "Out 2 Video" senders: the new one and the old one on the old flow. The registration loop only POSTed what the node offered and never DELETEd what it stopped offering, and the sender id was derived from the flow id, which includes the format.
-  - Sender ids no longer include the format, the video media type or the channel count: UUIDv5 of the node and `output/<n>/sender/<role>`. A format change keeps the sender, which points at the new flow (IS-04 `flow_id`, IS-05 `mxl_flow_id`); controllers keep their sender. **The sender ids change once with this release**: routes stored by sender id must be picked again once.
+  - Sender ids no longer include the format, the video media type or the channel count: UUIDv5 of the node and `output/<n>/sender/<role>`. A format change keeps the sender, which points at the new flow (IS-04 `flow_id`, IS-05 `mxl_flow_id`); controllers keep their sender.
+  - **Every sender id changes once with 1.2.1** (it was derived from the flow id). Routes and presets stored by sender id must be picked again once after the upgrade.
+  - **After a format change, receivers must be activated again** with the sender's new `mxl_flow_id`: the old MXL flow is removed, so a receiver still on the old flow id gets no more grains. The sender id stays, so a controller re-activates the same sender.
   - The node remembers what it registered and DELETEs what the model no longer has: the old flow after a format, `v210a` or channel change; sender, flow and source when an output drops its ANC or key flow. Senders go first, then flows, then sources.
-  - An output change is registered at once, not at the next 5 s heartbeat.
-  - After a run that ended without the node DELETE (a crash, SIGKILL), the first registration reads the device's sources, flows and senders from the Query API and DELETEs the ones it no longer offers.
+  - An output change, and an IS-05 `master_enable` change (`subscription.active`), is registered at once, not at the next 5 s heartbeat.
+  - After a run that ended without the node DELETE (a crash, SIGKILL), the first registration reads the device's sources, flows and senders from the Query API and DELETEs the ones it no longer offers. This is tried again until all three lists came back. A DELETE that fails is retried at every pass and warned once a minute.
   - The old MXL flow was already removed when its writer is released (the player is its only writer); the new integration test checks it.
+- Without `NMOS_SEED` and `HOST_ID`, the seed was `host-player` on every machine, so such players shared node and device ids (and with the cleanup above would remove each other's resources). The seed is now a random `player-<16 hex>`, kept in `CONFIG_DIR/nmos_seed` so the ids survive a restart, or the hostname when `CONFIG_DIR` is not writable; a warning at start says so. Set `NMOS_SEED` in production. The docs now say that sender, source and flow ids also depend on the output's position in the configuration.
 - The web UI's warning for a change that mints new flow ids says that the senders keep theirs.
 - New integration test `tests/integration/stale_sender.py` with a stand-in registry (`tests/integration/registry_stub.py`, also runnable on its own for lab checks).
 - The Compose and Kubernetes examples use the `1.2.1` image.

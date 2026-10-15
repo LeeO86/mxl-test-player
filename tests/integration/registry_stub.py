@@ -23,6 +23,7 @@ class Store:
         self.lock = threading.Lock()
         self.res = {t: {} for t in TYPES}
         self.deleted = []  # "<type>/<id>" in the order the DELETEs came
+        self.fail_lists = 0  # answer this many Query API list GETs with 503 (a Query API that is down)
 
     def snapshot(self):
         with self.lock:
@@ -103,6 +104,13 @@ def make_handler(store):
                 t = parts[3]
                 with store.lock:
                     items = list(store.res[t].values())
+                if len(parts) == 4:
+                    with store.lock:
+                        failing = store.fail_lists > 0
+                        if failing:
+                            store.fail_lists -= 1
+                    if failing:
+                        return self._send(503, {"error": "unavailable"})
                 if len(parts) == 5:
                     hit = [r for r in items if r.get("id") == parts[4]]
                     return self._send(200, hit[0]) if hit else self._send(404, {"error": "not found"})

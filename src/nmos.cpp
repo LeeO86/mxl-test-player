@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <sstream>
+#include <stdexcept>
 
 namespace mtp {
 namespace {
@@ -244,6 +245,7 @@ void NmosNode::registry_loop(std::string host, int port) {
     // old sender) stayed in the registry after a format change.
     NmosRegistered registered;
     bool adopted = false;  // resources of this device from an earlier run (crash, no node DELETE)
+    std::map<std::string, std::chrono::steady_clock::time_point> delete_warned;
     while (!stop_) {
         NmosModel m;
         {
@@ -262,20 +264,23 @@ void NmosNode::registry_loop(std::string host, int port) {
             if (http_ok(posted) && !adopted && !query_host_.empty()) {
                 // The registry may still hold this node's children from a run that ended
                 // without the node DELETE. Take them over, so the ones not in the model go.
-                adopted = true;
+                // Done only when all three lists came back; otherwise again at the next pass.
+                bool all = true;
                 for (const char* type : {"sources", "flows", "senders"}) {
                     const auto q = http_exchange(query_host_, query_port_, "GET",
                                                  std::string("/x-nmos/query/v1.3/") + type + "?device_id=" + m.device_id + "&paging.limit=1000", "");
-                    if (!http_ok(http_status(q))) continue;
                     try {
+                        if (!http_ok(http_status(q))) throw std::runtime_error("status");
                         const auto list = nlohmann::json::parse(http_body(q));
-                        if (!list.is_array()) continue;
+                        if (!list.is_array()) throw std::runtime_error("not a list");
                         for (const auto& r : list)
                             if (r.is_object() && r.value("device_id", "") == m.device_id && !r.value("id", "").empty())
                                 registered.emplace(r.value("id", ""), type);
                     } catch (const std::exception&) {
+                        all = false;
                     }
                 }
+                adopted = all;
             }
             post("device", nmos_device_json(m, v));
             for (const auto& s : m.senders) {
@@ -288,9 +293,16 @@ void NmosNode::registry_loop(std::string host, int port) {
                 const int code = http_status(http_exchange(host, port, "DELETE", "/x-nmos/registration/v1.3/resource/" + type + "/" + id, ""));
                 if (http_ok(code) || code == 404) {
                     registered.erase(id);
+                    delete_warned.erase(id);
                     log_info("NMOS: deleted " + type.substr(0, type.size() - 1) + " " + id + " (no longer offered)");
                 } else {
-                    log_warn("NMOS: DELETE of " + type + "/" + id + " returned " + std::to_string(code) + ", retrying");
+                    // Retried at every pass; warned once a minute per resource.
+                    const auto now = std::chrono::steady_clock::now();
+                    auto it = delete_warned.find(id);
+                    if (it == delete_warned.end() || now - it->second >= std::chrono::minutes(1)) {
+                        delete_warned[id] = now;
+                        log_warn("NMOS: DELETE of " + type + "/" + id + " returned " + std::to_string(code) + ", retrying");
+                    }
                 }
             }
             const auto health = http_exchange(host, port, "POST", "/x-nmos/registration/v1.3/health/nodes/" + m.node_id, "");
@@ -432,7 +444,9 @@ void NmosNode::handle(const HttpRequest& req, HttpResponse& res) {
                         std::lock_guard lock(mu_);
                         for (auto& s : model_.senders)
                             if (s.id == sid) s.master_enable = enable;
+                        dirty_ = true;  // subscription.active goes to the registry now
                     }
+                    cv_.notify_all();
                     if (on_master) on_master(sid, enable);
                 }
                 // Reflect the updated value.
