@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.2.1
+
+### Fixes
+
+- An output change no longer leaves a stale sender in the NMOS registry. After Out 2 went from `v210` to `v210a`, the registry listed two "Out 2 Video" senders: the new one and the old one on the old flow. The registration loop only POSTed what the node offered and never DELETEd what it stopped offering, and the sender id was derived from the flow id, which includes the format.
+  - Sender ids no longer include the format, the video media type or the channel count: UUIDv5 of the node and `output/<n>/sender/<role>`. A format change keeps the sender, which points at the new flow (IS-04 `flow_id`, IS-05 `mxl_flow_id`); controllers keep their sender. **The sender ids change once with this release**: routes stored by sender id must be picked again once.
+  - The node remembers what it registered and DELETEs what the model no longer has: the old flow after a format, `v210a` or channel change; sender, flow and source when an output drops its ANC or key flow. Senders go first, then flows, then sources.
+  - An output change is registered at once, not at the next 5 s heartbeat.
+  - After a run that ended without the node DELETE (a crash, SIGKILL), the first registration reads the device's sources, flows and senders from the Query API and DELETEs the ones it no longer offers.
+  - The old MXL flow was already removed when its writer is released (the player is its only writer); the new integration test checks it.
+- The web UI's warning for a change that mints new flow ids says that the senders keep theirs.
+- New integration test `tests/integration/stale_sender.py` with a stand-in registry (`tests/integration/registry_stub.py`, also runnable on its own for lab checks).
+- The Compose and Kubernetes examples use the `1.2.1` image.
+
 ## 1.2.0
 
 Operator-screen widgets, as in mxl-webrtc-monitor 1.3.0, mxl-replay 1.4.0 and mxl-color-corrector 1.1.0 (`SPECIFICATION.md` §9.1):

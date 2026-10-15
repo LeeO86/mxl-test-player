@@ -20,10 +20,12 @@ OutputIds derive_output_ids(const Uuid& node, int index, const VideoFormat& fmt,
     id.audio_flow = uuid_v5(id.audio_source, fmt.name + "/ch" + std::to_string(audio_channels));
     id.data_flow = uuid_v5(id.data_source, fmt.name + "/smpte291");
     id.key_flow = uuid_v5(id.key_source, fmt.name + "/key");
-    id.video_sender = uuid_v5(id.video_flow, "sender");
-    id.audio_sender = uuid_v5(id.audio_flow, "sender");
-    id.data_sender = uuid_v5(id.data_flow, "sender");
-    id.key_sender = uuid_v5(id.key_flow, "sender");
+    // Senders are the output's stable ports: they do not include the format, so a
+    // format change keeps the sender and only its flow_id changes (IS-04 allows this).
+    id.video_sender = uuid_v5(node, base + "/sender/video");
+    id.audio_sender = uuid_v5(node, base + "/sender/audio");
+    id.data_sender = uuid_v5(node, base + "/sender/data");
+    id.key_sender = uuid_v5(node, base + "/sender/key");
     return id;
 }
 

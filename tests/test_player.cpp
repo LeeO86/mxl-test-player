@@ -500,6 +500,20 @@ TEST_CASE("config env overrides file and ids are stable") {
     CHECK(a.video_flow.str().size() == 36);
     // Source id does not include the format, so a source swap would not retarget it.
     CHECK(a.video_source == c.video_source);
+    // Senders are stable ports: a new format, v210a or channel count keeps them, only the flow changes.
+    auto d = derive_output_ids(node, 0, *parse_format("1080p50"), 16, true);
+    auto e = derive_output_ids(node, 0, *parse_format("1080p50"), 8, false);
+    CHECK(a.video_flow != d.video_flow);
+    CHECK(a.audio_flow != e.audio_flow);
+    for (const auto* x : {&c, &d, &e}) {
+        CHECK(a.video_sender == x->video_sender);
+        CHECK(a.audio_sender == x->audio_sender);
+        CHECK(a.data_sender == x->data_sender);
+        CHECK(a.key_sender == x->key_sender);
+    }
+    auto other = derive_output_ids(node, 1, *parse_format("1080p50"), 16, false);
+    CHECK(a.video_sender != other.video_sender);
+    CHECK(a.video_sender != a.audio_sender);
 }
 
 TEST_CASE("platform settings, aliases and announce address") {
@@ -769,4 +783,45 @@ TEST_CASE("NMOS resources carry the fields IS-04 v1.3 requires") {
     for (const char* k : {"frame_width", "frame_height", "colorspace", "source_id", "device_id", "parents"}) CHECK_MESSAGE(vf.contains(k), k);
     CHECK(vf.at("version") == v);
     CHECK(nmos_flow_json(m, audio, v).contains("sample_rate"));
+}
+
+TEST_CASE("a format change deletes the old flow and keeps the sender") {
+    const auto node = node_id_from_seed("stale-unit");
+    auto model = [&](const OutputIds& ids, bool anc) {
+        NmosModel m;
+        m.node_id = node.str();
+        auto push = [&](const Uuid& sender, const Uuid& flow, const Uuid& source) {
+            NmosSenderState s;
+            s.id = sender.str();
+            s.flow_id = flow.str();
+            s.source_id = source.str();
+            m.senders.push_back(s);
+        };
+        push(ids.video_sender, ids.video_flow, ids.video_source);
+        push(ids.audio_sender, ids.audio_flow, ids.audio_source);
+        if (anc) push(ids.data_sender, ids.data_flow, ids.data_source);
+        return m;
+    };
+    const auto v210 = derive_output_ids(node, 1, *parse_format("1080p50"), 16, false);
+    const auto v210a = derive_output_ids(node, 1, *parse_format("1080p50"), 16, true);
+    const auto before = model(v210, true);
+    const auto registered = nmos_resources(before);
+    CHECK(registered.size() == 9);
+    CHECK(nmos_stale_resources(registered, before).empty());
+
+    // v210 -> v210a: one new video flow; the old one goes, the sender and source stay.
+    const auto after = model(v210a, true);
+    const auto stale = nmos_stale_resources(registered, after);
+    REQUIRE(stale.size() == 1);
+    CHECK(stale[0] == std::make_pair(std::string("flows"), v210.video_flow.str()));
+    const auto now = nmos_resources(after);
+    CHECK(now.at(v210.video_sender.str()) == "senders");
+    CHECK(now.at(v210a.video_flow.str()) == "flows");
+
+    // ANC off: its sender, flow and source go, the sender first.
+    const auto no_anc = nmos_stale_resources(registered, model(v210, false));
+    REQUIRE(no_anc.size() == 3);
+    CHECK(no_anc[0] == std::make_pair(std::string("senders"), v210.data_sender.str()));
+    CHECK(no_anc[1] == std::make_pair(std::string("flows"), v210.data_flow.str()));
+    CHECK(no_anc[2] == std::make_pair(std::string("sources"), v210.data_source.str()));
 }

@@ -316,6 +316,16 @@ is kept (configurable retention) so changing the platform format later is possib
 - Active IS-05 transport parameters are `mxl_domain_id` and `mxl_flow_id`.
 - A format change of an output mints new flow IDs and updates IS-04 Flows and the
   senders' active params; source changes (pattern ↔ file) do **not** change flows.
+- Sender and Source ids depend only on the seed, the output and the role
+  (video, audio, data, key), not on the format, the video media type (`v210` /
+  `v210a`) or the channel count. A format change keeps the sender: its `flow_id`
+  and IS-05 `mxl_flow_id` move to the new flow, and the old Flow is DELETEd from
+  the registry (senders first, then flows, then sources). An output that drops
+  its ANC or key flow DELETEs that sender, flow and source. The registry is
+  updated at once, not at the next 5 s heartbeat. Releasing the old MXL writer
+  removes the old flow from the own domain. After a run that ended without the
+  node DELETE, the next start reads the device's resources from the Query API
+  and DELETEs the ones it no longer offers.
 - The IS-04 sender/flow labels SHOULD carry the output label, so multiviewer UMDs
   show it automatically.
 - Static registry only. `NMOS_DNS_SD` defaults to false. `true` exits 78: this
@@ -465,6 +475,11 @@ mezzanine on a Precision 3930 class CPU with zero underruns over 1 h; 2 outputs
   loop boundary has no audio gap (sample continuity check); switching to a
   pattern does not change the flow ID; changing the output format mints new flow
   IDs and updates NMOS.
+- Integration (CI, CPU): with a stand-in registry, switching an output from v210
+  to v210a, its format, ANC and key leaves exactly one sender per output and role,
+  on the new flow; the old flow (and a dropped role's sender and source) is
+  DELETEd from the registry and the old MXL flow is gone; a restart after SIGKILL
+  with another format removes the flows the old run left.
 - Integration: burn-ins change live without new flow IDs and without missed grains
   (grain count equals TAI elapsed while text and moving box are edited); the moving
   box position at a given grain index is identical before and after a restart; an
