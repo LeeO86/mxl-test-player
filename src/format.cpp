@@ -44,6 +44,18 @@ std::optional<VideoFormat> parse_format(std::string_view text) {
     if (scan_c != 'p' && scan_c != 'i' && scan_c != 'P' && scan_c != 'I') return std::nullopt;
     const bool inter = scan_c == 'i' || scan_c == 'I';
     rest = rest.substr(1);
+    // Interlaced formats take an optional field order: "1080i25" and "1080i25tff" are top field
+    // first, "1080i25bff" bottom field first.
+    bool bff = false;
+    if (inter && rest.size() > 3) {
+        const auto suffix = rest.substr(rest.size() - 3);
+        if (suffix == "bff" || suffix == "BFF") {
+            bff = true;
+            rest = rest.substr(0, rest.size() - 3);
+        } else if (suffix == "tff" || suffix == "TFF") {
+            rest = rest.substr(0, rest.size() - 3);
+        }
+    }
     const RateTok* found = nullptr;
     for (const auto& r : kRates) {
         if (rest == r.text) {
@@ -63,12 +75,9 @@ std::optional<VideoFormat> parse_format(std::string_view text) {
         // 720p accepts the same rate set as 1080p.
     }
     VideoFormat f;
-    f.name = std::string(text);
-    // Canonicalise scan letter to lowercase.
-    for (char& c : f.name) {
-        if (c == 'P') c = 'p';
-        if (c == 'I') c = 'i';
-    }
+    // Canonical name: lowercase scan letter; tff without a suffix (the name keys flow ids and
+    // conversions), bff with "bff".
+    f.name = std::to_string(raster) + (inter ? "i" : "p") + found->text + (bff ? "bff" : "");
     if (raster == 720) {
         f.width = 1280;
         f.height = 720;
@@ -79,13 +88,13 @@ std::optional<VideoFormat> parse_format(std::string_view text) {
         f.width = 3840;
         f.height = 2160;
     }
-    f.scan = inter ? Scan::InterlacedTff : Scan::Progressive;
+    f.scan = inter ? (bff ? Scan::InterlacedBff : Scan::InterlacedTff) : Scan::Progressive;
     f.frame_rate = found->rate;
     return f;
 }
 
 std::string format_list_help() {
-    return "720/1080/2160 + p|i + 23.98|24|25|29.97|30|50|59.94|60 (interlace only 1080i25 and 1080i29.97)";
+    return "720/1080/2160 + p|i + 23.98|24|25|29.97|30|50|59.94|60 (interlace only 1080i25 and 1080i29.97; append bff for bottom field first, e.g. 1080i25bff)";
 }
 
 std::uint64_t samples_until_grain(std::uint64_t index, Rational grain_rate, std::int64_t sample_rate) {

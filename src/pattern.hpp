@@ -45,11 +45,14 @@ struct PatternRequest {
     VideoPattern pattern = VideoPattern::SmpteRp219;
     bool pluge = false;
     std::uint64_t frame_index = 0;  // frame at the output frame rate
-    int field = -1;                 // 0/1 when writing an interlaced field grain, else -1
+    // Interlaced: the field in time (0 first, 1 second) the frame is rendered for, else -1.
+    // Moving patterns are sampled at that field's time (half a frame later for field 1); the
+    // writer cuts the field's lines out of the whole frame.
+    int field = -1;
     bool flash = false;
 };
 
-// Writes one MXL grain (a frame, or one field when format is interlaced and field >= 0).
+// Renders a whole frame (format.width x format.height).
 void render_pattern(const PatternRequest& req, std::uint8_t* v210);
 
 // A frame that stays the same from grain to grain, and a token that identifies its content:

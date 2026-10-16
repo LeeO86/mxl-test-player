@@ -113,7 +113,7 @@ export function download(name, text, type = "application/json") {
 
 /** Frame rate of a format name ("1080i29.97" → 29.97 frames per second). */
 export function formatFps(name) {
-  const m = /^\d+[pi]([\d.]+)$/.exec(name || "");
+  const m = /^\d+[pi]([\d.]+)(?:tff|bff)?$/.exec(name || "");
   return m ? Number(m[1]) : 50;
 }
 
@@ -193,12 +193,14 @@ export const SIGNALS = [
 ];
 export const signalLabel = (v) => SIGNALS.find((s) => s.value === v)?.label || v || "–";
 
-/** Output formats parse_format accepts (§4): interlaced only 1080i25 and 1080i29.97. */
+/** Output formats parse_format accepts (§4): interlaced only 1080i25 and 1080i29.97, top field first or with bff bottom field first. */
 const RATES = ["23.98", "24", "25", "29.97", "30", "50", "59.94", "60"];
 export const FORMATS = [
   ...RATES.map((r) => `1080p${r}`),
   "1080i25",
+  "1080i25bff",
   "1080i29.97",
+  "1080i29.97bff",
   ...RATES.map((r) => `720p${r}`),
   ...RATES.map((r) => `2160p${r}`),
 ];

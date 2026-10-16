@@ -33,6 +33,14 @@ struct VideoFormat {
         return Rational{frame_rate.num * 2, frame_rate.den};
     }
     int field_height() const { return interlaced() ? height / 2 : height; }
+    bool bottom_field_first() const { return scan == Scan::InterlacedBff; }
+    // The frame lines an interlaced grain carries: 0 = the top field (even lines 0, 2, ...),
+    // 1 = the bottom field (odd lines). Grain 2k is the first field of frame k in time
+    // (the field rate's even index), grain 2k+1 the second: for interlaced_tff the first
+    // field is the top field, for interlaced_bff the bottom field.
+    int field_lines(std::uint64_t grain_index) const {
+        return static_cast<int>(grain_index & 1u) ^ (bottom_field_first() ? 1 : 0);
+    }
     const char* interlace_mode() const {
         switch (scan) {
             case Scan::InterlacedTff: return "interlaced_tff";

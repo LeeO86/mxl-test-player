@@ -144,10 +144,10 @@ void rgba_to_fill_key(const std::uint8_t* rgba, int w, int h, bool premultiply, 
     }
 }
 
-void extract_v210_field(const std::uint8_t* frame, int width, int height, int field, std::uint8_t* dst) {
+void extract_v210_field(const std::uint8_t* frame, int width, int height, int lines, std::uint8_t* dst) {
     const std::uint32_t stride = v210_line_stride(width);
     int out = 0;
-    for (int y = field & 1; y < height; y += 2) {
+    for (int y = lines & 1; y < height; y += 2) {
         std::memcpy(dst + static_cast<std::size_t>(out) * stride, frame + static_cast<std::size_t>(y) * stride, stride);
         ++out;
     }

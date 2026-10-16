@@ -430,7 +430,10 @@ void Output::writer_main() {
         const bool inter = fmt.interlaced();
         const std::uint64_t abs_frame = inter ? idx / 2 : idx;
         std::int64_t media_frame = 0;
+        // field: the grain's field in time (0 first, 1 second); lines: the frame lines it carries
+        // (0 top/even, 1 bottom/odd). bff writes the bottom field first.
         int field = inter ? static_cast<int>(idx & 1u) : -1;
+        const int lines = inter ? fmt.field_lines(idx) : 0;
         std::int64_t loop_index = 0;
         bool idle = transport == "stop";
         {
@@ -559,7 +562,9 @@ void Output::writer_main() {
                 req.pattern = parse_video_pattern(src.pattern);
                 req.pluge = src.pluge;
                 req.frame_index = static_cast<std::uint64_t>(std::max<std::int64_t>(0, media_frame));
-                req.field = -1;
+                // Each field of an interlaced grain is sampled at its own time: moving patterns
+                // advance between the first and the second field.
+                req.field = field;
                 req.flash = (src.sync_beep || src.pattern == "av_sync") && is_sync_frame(req.frame_index, fmt.frame_rate);
                 fill_src = still_pattern(req);
                 if (!fill_src.data) render_pattern(req, fill);
@@ -672,7 +677,7 @@ void Output::writer_main() {
             std::vector<std::uint8_t> grain;
             if (inter) {
                 grain.resize(v210_size(fmt.width, fmt.field_height()));
-                extract_v210_field(full.data(), fmt.width, fmt.height, field, grain.data());
+                extract_v210_field(full.data(), fmt.width, fmt.height, lines, grain.data());
             } else {
                 grain.assign(full.begin(), full.end());
             }
@@ -683,7 +688,7 @@ void Output::writer_main() {
                 if (inter) {
                     const std::uint32_t stride = alpha10_line_stride(fmt.width);
                     int o = 0;
-                    for (int y = field & 1; y < fmt.height; y += 2) {
+                    for (int y = lines; y < fmt.height; y += 2) {
                         if (static_cast<std::size_t>(y + 1) * stride <= a10_bytes)
                             std::memcpy(apart.data() + static_cast<std::size_t>(o) * stride, a10 + static_cast<std::size_t>(y) * stride, stride);
                         ++o;
@@ -701,7 +706,7 @@ void Output::writer_main() {
             key_.write_video(idx, key, full_bytes);
         } else if (write_k && flows_open_) {
             std::vector<std::uint8_t> field_key(v210_size(fmt.width, fmt.field_height()));
-            extract_v210_field(key, fmt.width, fmt.height, field, field_key.data());
+            extract_v210_field(key, fmt.width, fmt.height, lines, field_key.data());
             key_.write_video(idx, field_key.data(), field_key.size());
         }
 

@@ -30,7 +30,7 @@ Precedence is environment, then the JSON file (`--config`, else `PLAYER_CONFIG`,
 | `CONFIG_DIR` | `/config` | Only directory the process writes for its own state |
 | `PLAYER_CONFIG` | `$CONFIG_DIR/player.json` | Config file path. Alias of `--config` |
 | `PLAYER_STATE` | `$CONFIG_DIR/state.json` | Alias of the state file path |
-| `PLAYER_FORMAT` | `1080p50` | Platform format |
+| `PLAYER_FORMAT` | `1080p50` | Platform format (`1080i25` and `1080i29.97` are top field first; `1080i25bff` and `1080i29.97bff` bottom field first) |
 | `PLAYER_OUTPUTS` | `2` | Output count, 1..16 |
 | `PLAYER_AUDIO_CHANNELS` | `16` | Default audio channels |
 | `PLAYER_LIBRARY_DIR` | `/data/library` | Mezzanine library |

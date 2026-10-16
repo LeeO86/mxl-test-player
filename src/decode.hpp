@@ -67,7 +67,9 @@ private:
 void rgba_to_fill_key(const std::uint8_t* rgba, int w, int h, bool premultiply, std::uint8_t* fill_v210, std::uint8_t* key_v210,
                       std::uint8_t* alpha10, int key_min, int key_max);
 
-void extract_v210_field(const std::uint8_t* frame, int width, int height, int field, std::uint8_t* dst);
+// Copies one field's lines out of a frame: lines 0 = the top field (even lines), 1 = the bottom
+// field (odd lines). VideoFormat::field_lines gives the lines of a grain index.
+void extract_v210_field(const std::uint8_t* frame, int width, int height, int lines, std::uint8_t* dst);
 
 bool write_jpeg(const std::string& path, const std::uint8_t* rgb, int w, int h, int quality);
 bool v210_to_jpeg(const std::string& path, const std::uint8_t* v210, int w, int h, int out_w);
