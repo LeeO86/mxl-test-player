@@ -607,12 +607,11 @@ TEST_CASE("interlaced ANC runs at the field rate: one grain per field at the vid
     CHECK(rate("1080p25") == Rational{25, 1});  // progressive unchanged
     CHECK(rate("1080p59.94") == Rational{60000, 1001});
 
-    auto field_of = [](const std::vector<std::uint8_t>& g) { return g[5] >> 6; };
+    auto field_of = [](const std::vector<std::uint8_t>& g) { return g[3] >> 6; };
     auto line_of = [](const std::vector<std::uint8_t>& g) {
-        const std::uint32_t h = (std::uint32_t{g[8]} << 24) | (std::uint32_t{g[9]} << 16) | (std::uint32_t{g[10]} << 8) | g[11];
+        const std::uint32_t h = (std::uint32_t{g[6]} << 24) | (std::uint32_t{g[7]} << 16) | (std::uint32_t{g[8]} << 8) | g[9];
         return static_cast<int>((h >> 20) & 0x7FFu);
     };
-    auto sequence_of = [](const std::vector<std::uint8_t>& g) { return (g[0] << 8) | g[1]; };
 
     // Grains 2k and 2k+1 carry frame k's timecode; the second has the field flag, F = 0b11 and a field-2 line.
     const VideoFormat fmt = *parse_format("1080i25");
@@ -626,8 +625,6 @@ TEST_CASE("interlaced ANC runs at the field rate: one grain per field at the vid
     CHECK(field_of(g2) == 0x3);
     CHECK(line_of(g1) == 10);
     CHECK(line_of(g2) == 572);
-    CHECK(sequence_of(g1) == 14);
-    CHECK(sequence_of(g2) == 15);
     Timecode t1, t2;
     AtcKind kind = AtcKind::Ltc;
     REQUIRE(decode_anc_timecode(g1.data(), g1.size(), t1, kind));
@@ -637,12 +634,50 @@ TEST_CASE("interlaced ANC runs at the field rate: one grain per field at the vid
     CHECK(t1.field == 0);
     CHECK(t2.field == 1);
 
-    // Progressive: F = 0b00, line 10, the frame index as the sequence number.
+    // Progressive: F = 0b00, line 10.
     const VideoFormat p = *parse_format("1080p25");
     const auto gp = encode_anc_grain(anc_packet_for_grain(15, p, timecode_for_grain(15, p, q), AtcKind::Ltc));
     CHECK(field_of(gp) == 0);
     CHECK(line_of(gp) == 10);
-    CHECK(sequence_of(gp) == 15);
+}
+
+TEST_CASE("ANC grain bytes are the RFC 8331 payload from the Length field on, as MXL stores it") {
+    // Reference vectors: mxl-st2110-gateway codec::serialiseGrain (the gateway's ANC ingest and
+    // egress codec, which follows MXL docs/Architecture.md and mxl-data-probe) for the same packet.
+    // Length(16) ANC_Count(8) F(2) reserved(22), then the packet at byte 6.
+    const std::vector<std::uint8_t> progressive = {
+        0x00, 0x20, 0x01, 0x00, 0x00, 0x00, 0x00, 0xAF, 0xFE, 0x00, 0x98, 0x26, 0x04, 0x41, 0x20, 0x80, 0x11, 0x08, 0x02,
+        0x00, 0x80, 0x23, 0x08, 0x02, 0x00, 0x80, 0x12, 0x08, 0x02, 0x00, 0x80, 0x11, 0x08, 0x02, 0x60, 0x00, 0x00, 0x00};
+    const std::vector<std::uint8_t> field2 = {
+        0x00, 0x20, 0x01, 0xC0, 0x00, 0x00, 0x23, 0xCF, 0xFE, 0x00, 0x98, 0x26, 0x04, 0x42, 0x28, 0x80, 0x11, 0x08, 0x02,
+        0x00, 0x80, 0x23, 0x08, 0x02, 0x00, 0x80, 0x12, 0x08, 0x02, 0x00, 0x80, 0x29, 0x08, 0x02, 0xE8, 0x00, 0x00, 0x00};
+    auto matches = [](const std::vector<std::uint8_t>& grain, const std::vector<std::uint8_t>& ref) {
+        REQUIRE(grain.size() == kAncGrainSize);
+        CHECK(std::vector<std::uint8_t>(grain.begin(), grain.begin() + ref.size()) == ref);
+        CHECK(std::all_of(grain.begin() + ref.size(), grain.end(), [](std::uint8_t b) { return b == 0; }));
+    };
+
+    AncPacket a;
+    a.tc.hh = 10;
+    a.tc.mm = 20;
+    a.tc.ss = 30;
+    a.tc.ff = 12;
+    a.line = 10;
+    matches(encode_anc_grain(a), progressive);  // LTC, F = 0b00
+
+    AncPacket b = a;
+    b.interlaced = true;
+    b.tc.field = 1;
+    b.line = 572;
+    b.kind = AtcKind::Vitc1;
+    matches(encode_anc_grain(b), field2);  // VITC1, F = 0b11, line 572
+
+    Timecode tc;
+    AtcKind kind = AtcKind::Ltc;
+    REQUIRE(decode_anc_timecode(field2.data(), field2.size(), tc, kind));
+    CHECK(tc.format() == "10:20:30:12");
+    CHECK(tc.field == 1);
+    CHECK(kind == AtcKind::Vitc1);
 }
 
 TEST_CASE("moving box is a pure function of the grain index") {
