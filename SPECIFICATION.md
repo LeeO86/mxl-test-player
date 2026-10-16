@@ -90,6 +90,8 @@ overlays beyond §5.4, scheduling by time of day.
 - Interlaced representation in MXL: each grain is one field (not a frame), the
   field order is `interlace_mode` in `flow_def.json`, as in mxl-decklink and
   mxl-st2110-gateway with the pinned MXL:
+  - Interlaced video and its ANC follow the shared MXL interlaced convention:
+    https://github.com/LeeO86/mxl-multiviewer/blob/main/docs/mxl-interlaced.md
   - Pinned MXL `218ddaa` stores an interlaced flow as fields: each grain is one field
     of `height / 2` lines, at twice the definition's `grain_rate`. Grain 2k is the
     first field of frame k in time and grain 2k+1 the second (the writer requirement
