@@ -283,6 +283,11 @@ is kept (configurable retention) so changing the platform format later is possib
   falling back to 00:00:00:00 at item start), `free` (counts from a preset value).
 - Drop-frame for 29.97/59.94 (configurable), field flag for interlaced formats;
   ATC_LTC by default, ATC_VITC1/2 optional.
+- Interlaced formats (1.2.3): the data flow runs at the field rate, as the shared
+  interlaced convention requires: `grain_rate` twice the frame rate (50/1 at 1080i25,
+  60000/1001 at 1080i29.97); grain 2k carries the first field's packet (RFC 8331
+  F = 0b10, line 10) and grain 2k+1 the second field's (F = 0b11, line 572, field
+  flag set), at the same index as the video field. Both carry the frame's timecode.
 - The same timecode drives the burn-in (§5.4), so picture and ANC always agree.
 - NMOS: one data sender (`urn:x-nmos:format:data`, `video/smpte291`) per output in
   the output's group (`<output label>:Data`).

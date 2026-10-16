@@ -740,12 +740,8 @@ void Output::writer_main() {
             if (!audio_.write_audio(sample_index, planar.data(), channels, static_cast<int>(count))) late = true;
         }
         if (write_d && flows_open_) {
-            AncPacket pkt;
-            pkt.tc = tc;
-            pkt.kind = cfg.atc;
-            pkt.interlaced = inter;
-            pkt.sequence = static_cast<std::uint16_t>(idx);
-            auto grain_anc = encode_anc_grain(pkt);
+            // Same index as the video grain: at an interlaced format each field has its own ANC grain.
+            auto grain_anc = encode_anc_grain(anc_packet_for_grain(idx, fmt, tc, cfg.atc));
             data_.write_data(idx, grain_anc.data(), grain_anc.size());
         }
         if (late) underruns_++;
