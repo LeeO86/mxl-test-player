@@ -2,6 +2,7 @@
 #include "audio.hpp"
 #include "config.hpp"
 #include "conform.hpp"
+#include "decode.hpp"
 #include "format.hpp"
 #include "ids.hpp"
 #include "media.hpp"
@@ -21,9 +22,11 @@
 #include <doctest.h>
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <thread>
@@ -237,6 +240,171 @@ TEST_CASE("v210 pack roundtrip and legal black") {
     CHECK(cb[0] == kCMid);
     CHECK(cr[0] == kCMid);
     CHECK(v210_line_stride(1920) == 5120);
+}
+
+TEST_CASE("interlaced field order: tff and bff formats") {
+    auto t = parse_format("1080i25");
+    REQUIRE(t);
+    CHECK(t->scan == Scan::InterlacedTff);
+    CHECK(t->name == "1080i25");
+    auto t2 = parse_format("1080i25tff");
+    REQUIRE(t2);
+    CHECK(t2->scan == Scan::InterlacedTff);
+    CHECK(t2->name == "1080i25");  // the same flow ids as 1080i25
+    auto b = parse_format("1080i25bff");
+    REQUIRE(b);
+    CHECK(b->scan == Scan::InterlacedBff);
+    CHECK(b->name == "1080i25bff");
+    CHECK(std::string(b->interlace_mode()) == "interlaced_bff");
+    CHECK(b->grain_rate() == Rational{50, 1});
+    CHECK(b->field_height() == 540);
+    auto b2 = parse_format("1080I29.97bff");
+    REQUIRE(b2);
+    CHECK(b2->name == "1080i29.97bff");
+    CHECK(b2->frame_rate == Rational{30000, 1001});
+    CHECK_FALSE(parse_format("1080p25bff"));
+    CHECK_FALSE(parse_format("1080i50bff"));
+    CHECK_FALSE(parse_format("1080ibff"));
+
+    // Grain 2k is the first field of frame k: top lines for tff, bottom lines for bff.
+    CHECK(t->field_lines(0) == 0);
+    CHECK(t->field_lines(1) == 1);
+    CHECK(t->field_lines(1000) == 0);
+    CHECK(b->field_lines(0) == 1);
+    CHECK(b->field_lines(1) == 0);
+    CHECK(b->field_lines(1001) == 0);
+}
+
+namespace {
+
+// The lines a reader puts a field grain in, written independently of the player as the
+// multiviewer states it (src/media/interlace.cpp fieldLineParity): grain 2k is the first field,
+// the top field for tff and the bottom field for bff.
+int reader_line_parity(std::uint64_t index, bool bff) { return static_cast<int>(index & 1u) ^ (bff ? 1 : 0); }
+
+// Weaves field grain `index` with the grain before it into a whole frame.
+std::vector<std::uint8_t> reader_weave(const std::vector<std::uint8_t>& cur, const std::vector<std::uint8_t>& prev, std::uint64_t index,
+                                       bool bff, int width, int height) {
+    const std::size_t stride = v210_line_stride(width);
+    std::vector<std::uint8_t> out(v210_size(width, height));
+    const int pc = reader_line_parity(index, bff);
+    for (int r = 0; r < height / 2; ++r) {
+        std::memcpy(out.data() + static_cast<std::size_t>(2 * r + pc) * stride, cur.data() + static_cast<std::size_t>(r) * stride, stride);
+        std::memcpy(out.data() + static_cast<std::size_t>(2 * r + (1 - pc)) * stride, prev.data() + static_cast<std::size_t>(r) * stride, stride);
+    }
+    return out;
+}
+
+// The grain the writer makes for MXL grain `idx` (output.cpp): the frame rendered for the
+// field's time, then the field's lines cut out of it.
+std::vector<std::uint8_t> writer_field_grain(const VideoFormat& fmt, VideoPattern pattern, std::uint64_t idx) {
+    std::vector<std::uint8_t> full(v210_size(fmt.width, fmt.height));
+    PatternRequest req;
+    req.format = fmt;
+    req.pattern = pattern;
+    req.frame_index = idx / 2;
+    req.field = static_cast<int>(idx & 1u);
+    render_pattern(req, full.data());
+    std::vector<std::uint8_t> grain(v210_size(fmt.width, fmt.field_height()));
+    extract_v210_field(full.data(), fmt.width, fmt.height, fmt.field_lines(idx), grain.data());
+    return grain;
+}
+
+std::vector<std::uint8_t> whole_frame(const VideoFormat& fmt, VideoPattern pattern, std::uint64_t frame, int field) {
+    std::vector<std::uint8_t> full(v210_size(fmt.width, fmt.height));
+    PatternRequest req;
+    req.format = fmt;
+    req.pattern = pattern;
+    req.frame_index = frame;
+    req.field = field;
+    render_pattern(req, full.data());
+    return full;
+}
+
+// Left edge of the field_order pattern's white bar on frame line y, -1 without one.
+int bar_x(const std::uint8_t* frame, int width, int y) {
+    std::vector<std::uint16_t> yy(static_cast<std::size_t>(width)), cb(static_cast<std::size_t>(width / 2)), cr(static_cast<std::size_t>(width / 2));
+    unpack_v210_line(frame + static_cast<std::size_t>(y) * v210_line_stride(width), width, yy.data(), cb.data(), cr.data());
+    for (int x = 0; x < width; ++x)
+        if (yy[static_cast<std::size_t>(x)] > 900) return x;
+    return -1;
+}
+
+}  // namespace
+
+TEST_CASE("interlaced grains: each field in its own lines, de-woven by a reader (tff and bff)") {
+    for (const char* name : {"1080i25", "1080i25bff", "1080i29.97bff"}) {
+        CAPTURE(name);
+        const VideoFormat fmt = *parse_format(name);
+        const bool bff = fmt.bottom_field_first();
+        const int w = fmt.width;
+        const int h = fmt.height;
+        const std::size_t stride = v210_line_stride(w);
+
+        // A frame whose every line carries its own number in luma: the reader must put each
+        // line back where it was.
+        std::vector<std::uint8_t> numbered(v210_size(w, h));
+        {
+            std::vector<std::uint16_t> y(static_cast<std::size_t>(w)), c(static_cast<std::size_t>(w / 2), kCMid);
+            for (int line = 0; line < h; ++line) {
+                std::fill(y.begin(), y.end(), static_cast<std::uint16_t>(4 + line % 1000));  // 10-bit
+                pack_v210_line(y.data(), c.data(), c.data(), w, numbered.data() + static_cast<std::size_t>(line) * stride);
+            }
+        }
+        for (std::uint64_t k : {0ull, 7ull}) {
+            std::vector<std::uint8_t> first(v210_size(w, h / 2)), second(v210_size(w, h / 2));
+            extract_v210_field(numbered.data(), w, h, fmt.field_lines(2 * k), first.data());
+            extract_v210_field(numbered.data(), w, h, fmt.field_lines(2 * k + 1), second.data());
+            std::vector<std::uint16_t> y(static_cast<std::size_t>(w)), cb(static_cast<std::size_t>(w / 2)), cr(static_cast<std::size_t>(w / 2));
+            // The first field in time is the top field (line 0) for tff, the bottom one (line 1) for bff.
+            unpack_v210_line(first.data(), w, y.data(), cb.data(), cr.data());
+            CHECK(y[0] == 4 + (bff ? 1 : 0));
+            unpack_v210_line(second.data(), w, y.data(), cb.data(), cr.data());
+            CHECK(y[0] == 4 + (bff ? 0 : 1));
+            const auto woven = reader_weave(second, first, 2 * k + 1, bff, w, h);
+            CHECK(woven == numbered);
+        }
+
+        // Moving patterns: each field is sampled at its own time, so the woven frame holds the
+        // first field's picture in the first field's lines and the second's in the others.
+        for (std::uint64_t k : {0ull, 5ull}) {
+            const auto g0 = writer_field_grain(fmt, VideoPattern::FieldOrder, 2 * k);
+            const auto g1 = writer_field_grain(fmt, VideoPattern::FieldOrder, 2 * k + 1);
+            CHECK(g0 != g1);
+            const auto woven = reader_weave(g1, g0, 2 * k + 1, bff, w, h);
+            const auto at_first = whole_frame(fmt, VideoPattern::FieldOrder, k, 0);
+            const auto at_second = whole_frame(fmt, VideoPattern::FieldOrder, k, 1);
+            const int first_lines = bff ? 1 : 0;
+            bool lines_match = true;
+            for (int line = 0; line < h; ++line) {
+                const auto& src = (line & 1) == first_lines ? at_first : at_second;
+                if (std::memcmp(woven.data() + static_cast<std::size_t>(line) * stride, src.data() + static_cast<std::size_t>(line) * stride, stride) != 0)
+                    lines_match = false;
+            }
+            CHECK(lines_match);
+            // The bar moved right from the first field to the second (temporal order).
+            const int mid = h / 2;
+            const int x_first = bar_x(woven.data(), w, mid + ((mid & 1) == first_lines ? 0 : 1));
+            const int x_second = bar_x(woven.data(), w, mid + ((mid & 1) == first_lines ? 1 : 0));
+            CHECK(x_first >= 0);
+            CHECK(x_second > x_first);
+            // The next frame's first field is later still.
+            const auto g2 = writer_field_grain(fmt, VideoPattern::FieldOrder, 2 * k + 2);
+            const auto next = reader_weave(g2, g1, 2 * k + 2, bff, w, h);
+            const int x_next = bar_x(next.data(), w, mid + ((mid & 1) == first_lines ? 0 : 1));
+            CHECK(x_next > x_second);
+        }
+
+        // The motion pattern and the moving zone plate change between the two fields of a frame.
+        for (auto p : {VideoPattern::Motion, VideoPattern::ZonePlateMoving}) {
+            CHECK(whole_frame(fmt, p, 3, 0) != whole_frame(fmt, p, 3, 1));
+        }
+        // Patterns that do not move are the same in both fields.
+        CHECK(whole_frame(fmt, VideoPattern::SmpteRp219, 3, 0) == whole_frame(fmt, VideoPattern::SmpteRp219, 3, 1));
+    }
+    // Progressive: the field is ignored and a pattern is sampled once per frame as before.
+    const VideoFormat p = *parse_format("1080p25");
+    CHECK(whole_frame(p, VideoPattern::Motion, 3, -1) == whole_frame(p, VideoPattern::Motion, 3, 1));
 }
 
 TEST_CASE("pattern checksums are stable and solids hit legal levels") {

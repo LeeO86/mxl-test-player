@@ -156,7 +156,7 @@ void multiburst(Raster& r, bool sweep) {
     }
 }
 
-void zone(Raster& r, std::uint64_t frame, bool moving) {
+void zone(Raster& r, double frame, bool moving) {
     const double cx = (r.w - 1) / 2.0 + (moving ? std::sin(frame * 0.07) * r.w * 0.15 : 0);
     const double cy = (r.h - 1) / 2.0;
     const double k = (moving ? 0.0008 + 0.00005 * std::sin(frame * 0.03) : 0.0012) * (1920.0 / r.w);
@@ -236,13 +236,14 @@ void safe_area(Raster& r) {
 
 void solid(Raster& r, double rr, double g, double b) { r.fill_rect_rgb(0, 0, r.w, r.h, rr, g, b); }
 
-void motion(Raster& r, std::uint64_t frame) {
+// `step` counts grains (fields when interlaced), `t` is the time in frames.
+void motion(Raster& r, std::uint64_t step, double t) {
     solid(r, 0.05, 0.05, 0.08);
     const int bw = std::max(8, r.w / 32);
-    const int x = static_cast<int>(frame % static_cast<std::uint64_t>(std::max(1, r.w - bw)));
+    const int x = static_cast<int>(step % static_cast<std::uint64_t>(std::max(1, r.w - bw)));
     r.fill_rect_rgb(x, 0, bw, r.h, 1, 0.85, 0.1);
     // Rotating segment: a radial spoke so a frozen frame is obvious.
-    const double ang = frame * 0.17;
+    const double ang = t * 0.17;
     const double cx = r.w / 2.0;
     const double cy = r.h / 2.0;
     for (int t = 0; t < r.h / 2; ++t) {
@@ -357,6 +358,10 @@ namespace {
 
 void render_raster(const PatternRequest& req, int w, int h, bool flash, std::uint8_t* v210) {
     const std::uint64_t frame = req.frame_index;
+    // Interlaced: the second field is sampled half a frame after the first.
+    const bool fields = req.field >= 0 && req.format.interlaced();
+    const double t = static_cast<double>(frame) + (fields && req.field == 1 ? 0.5 : 0.0);
+    const std::uint64_t step = fields ? frame * 2 + static_cast<std::uint64_t>(req.field & 1) : frame;
     Raster r(w, h);
     switch (req.pattern) {
         case VideoPattern::Ebu100_75: bars(r, kEbu10075, 7, req.pluge); break;
@@ -367,8 +372,8 @@ void render_raster(const PatternRequest& req, int w, int h, bool flash, std::uin
         case VideoPattern::LumaSteps: luma_steps(r); break;
         case VideoPattern::Multiburst: multiburst(r, false); break;
         case VideoPattern::Sweep: multiburst(r, true); break;
-        case VideoPattern::ZonePlate: zone(r, frame, false); break;
-        case VideoPattern::ZonePlateMoving: zone(r, frame, true); break;
+        case VideoPattern::ZonePlate: zone(r, 0, false); break;
+        case VideoPattern::ZonePlateMoving: zone(r, t, true); break;
         case VideoPattern::Checkerboard: checker(r); break;
         case VideoPattern::Grid: grid(r); break;
         case VideoPattern::Circle: circle(r); break;
@@ -379,8 +384,8 @@ void render_raster(const PatternRequest& req, int w, int h, bool flash, std::uin
         case VideoPattern::Green: solid(r, 0, 1, 0); break;
         case VideoPattern::Blue: solid(r, 0, 0, 1); break;
         case VideoPattern::Grey50: solid(r, 0.5, 0.5, 0.5); break;
-        case VideoPattern::Motion: motion(r, frame); break;
-        case VideoPattern::FieldOrder: field_order(r, frame, req.field); break;
+        case VideoPattern::Motion: motion(r, step, t); break;
+        case VideoPattern::FieldOrder: field_order(r, frame, fields ? req.field : -1); break;
         case VideoPattern::AvSync: bars(r, k75, 7, false); break;
         case VideoPattern::SmpteRp219:
         default: smpte(r, req.pluge); break;
@@ -389,9 +394,6 @@ void render_raster(const PatternRequest& req, int w, int h, bool flash, std::uin
     r.pack(v210);
 }
 
-int grain_height(const PatternRequest& req) {
-    return (req.field >= 0 && req.format.interlaced()) ? req.format.field_height() : req.format.height;
-}
 
 bool flash_of(const PatternRequest& req) {
     return req.flash || (req.pattern == VideoPattern::AvSync && is_sync_frame(req.frame_index, req.format.frame_rate));
@@ -402,7 +404,7 @@ bool flash_of(const PatternRequest& req) {
 StillFrame still_pattern(const PatternRequest& req) {
     if (req.pattern == VideoPattern::ZonePlateMoving || req.pattern == VideoPattern::Motion || req.pattern == VideoPattern::FieldOrder) return {};
     const int w = req.format.width;
-    const int h = grain_height(req);
+    const int h = req.format.height;
     const bool flash = flash_of(req);
     const std::size_t size = static_cast<std::size_t>(v210_line_stride(w)) * h;
     // Patterns that do not move are rendered once per writer thread and then copied:
@@ -431,10 +433,10 @@ StillFrame still_pattern(const PatternRequest& req) {
 void render_pattern(const PatternRequest& req, std::uint8_t* v210) {
     const StillFrame still = still_pattern(req);
     if (still.data) {
-        std::memcpy(v210, still.data, static_cast<std::size_t>(v210_line_stride(req.format.width)) * grain_height(req));
+        std::memcpy(v210, still.data, static_cast<std::size_t>(v210_line_stride(req.format.width)) * req.format.height);
         return;
     }
-    render_raster(req, req.format.width, grain_height(req), flash_of(req), v210);
+    render_raster(req, req.format.width, req.format.height, flash_of(req), v210);
 }
 
 }  // namespace mtp

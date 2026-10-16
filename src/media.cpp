@@ -547,7 +547,9 @@ bool Library::convert_one(LibraryItem& item, const VideoFormat& format, ConvertJ
         const std::string fps = std::to_string(prog_fps_num) + "/" + std::to_string(prog_fps_den);
         if (item.fps_mode == "motion") vf += "minterpolate=fps=" + fps + ":mi_mode=mci,";
         else vf += "fps=" + fps + ",";
-        if (dst_i) vf += "tinterlace=mode=interleave_top,";
+        // Two progressive frames at the field rate make one frame; the earlier one goes into the
+        // first field's lines (top for tff, bottom for bff).
+        if (dst_i) vf += format.bottom_field_first() ? "tinterlace=mode=interleave_bottom," : "tinterlace=mode=interleave_top,";
         vf += "format=yuv422p10le";
         const auto video_only = dir / "video-tmp.mov";
         const auto mezz = dir / ("mezz-" + format.name + ".mov");

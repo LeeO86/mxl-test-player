@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.2.2
+
+### Fixes
+
+- **Bottom field first is written in the right lines.** Pinned MXL `218ddaa` stores an interlaced flow as fields (one grain = one field of `height / 2` lines, at the field rate). The writer took a grain's lines from its index alone (grain 2k the even lines, 2k+1 the odd lines), which is right for `interlaced_tff` only: an `interlaced_bff` flow carried each field one line off. Grain 2k is now the first field of frame k in time, as the multiviewer's specification requires of writers: the top field (even lines) for tff, the bottom field (odd lines) for bff. The fill, the v210a alpha plane and the `fill_key` key all follow it.
+- Bottom field first can now be chosen: the formats `1080i25bff` and `1080i29.97bff` (`PLAYER_FORMAT`, an output's `format`, the web UI's format list). `1080i25` and `1080i29.97` stay top field first (also accepted as `1080i25tff`, same name and flow ids). Before, every interlaced format was tff.
+- **Each field is sampled at its own time.** Moving patterns were rendered once per frame and both fields cut from that frame, so an interlaced output showed no motion between its two fields. The motion pattern, the moving zone plate and the field-order pattern are now rendered for each field's time (the second field half a frame later); the field-order pattern's bar moves one step per field and its top stripe is green on the first field and red on the second. At interlaced formats the motion pattern's bar now moves one pixel per field (it moved one per frame). Moving boxes and text burn-ins already followed the grain.
+- A video item converted for a bff format is woven with the earlier picture in the bottom field (`tinterlace=interleave_bottom`; tff keeps `interleave_top`).
+- New unit tests: the tff and bff formats, the lines of each grain, a reader that weaves the field grains as the multiviewer does (grain 2k is the first field) and gets every line back in place, and the field-order pattern moving forward from the first field to the second and on to the next frame.
+- The Compose and Kubernetes examples use the `1.2.2` image.
+
 ## 1.2.1
 
 ### Fixes

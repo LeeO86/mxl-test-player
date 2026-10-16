@@ -83,12 +83,22 @@ overlays beyond §5.4, scheduling by time of day.
 
 - **Platform format** (per container, `PLAYER_FORMAT`, default `1080p50`):
   raster 1920×1080, 1280×720 or 3840×2160; scan progressive or interlaced
-  (1080i25, 1080i29.97 frames); rate 23.98–60. Optionally overridable per output
+  (1080i25, 1080i29.97 frames, top field first; `1080i25bff`, `1080i29.97bff`
+  bottom field first); rate 23.98–60. Optionally overridable per output
   (`outputs[n].format`) — then items are converted for each format they are used
   in (§6.3).
 - Interlaced representation in MXL follows what mxl-decklink and
   mxl-st2110-gateway use for 1080i (grain = frame, field order in `flow_def.json`);
   verify against those repos and the pinned MXL.
+  - Pinned MXL `218ddaa` stores an interlaced flow as fields: each grain is one field
+    of `height / 2` lines, at twice the definition's `grain_rate`. Grain 2k is the
+    first field of frame k in time and grain 2k+1 the second (the writer requirement
+    in mxl-multiviewer's specification): the first field is the top field (even
+    lines) for `interlaced_tff` and the bottom field (odd lines) for `interlaced_bff`.
+  - Each field is sampled at its own time: moving patterns (motion, moving zone
+    plate, field order) and the moving boxes advance between the two fields of a
+    frame; a converted item is made at the field rate and woven with
+    `tinterlace` (`interleave_top` for tff, `interleave_bottom` for bff).
 - Video: `video/v210`, BT.709, SDR.
 - Audio: `audio/float32`, 48 kHz, channel count per output (default 16,
   configurable 2–64); exact grain cadence (960 per grain at 50, 1601/1602 at 59.94).
