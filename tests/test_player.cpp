@@ -273,6 +273,14 @@ TEST_CASE("interlaced field order: tff and bff formats") {
     CHECK(b->field_lines(0) == 1);
     CHECK(b->field_lines(1) == 0);
     CHECK(b->field_lines(1001) == 0);
+
+    // The flow definition the writer creates says bff, at the frame rate (MXL doubles it for the grains).
+    const Uuid id = uuid_from_seed("bff-flow");
+    const auto def = nlohmann::json::parse(video_flow_json(id, "Out 1", "Out 1", "Video", *b, false, id, id));
+    CHECK(def["interlace_mode"] == "interlaced_bff");
+    CHECK(def["frame_height"] == 1080);
+    CHECK(def["grain_rate"]["numerator"] == 25);
+    CHECK(def["grain_rate"]["denominator"] == 1);
 }
 
 namespace {

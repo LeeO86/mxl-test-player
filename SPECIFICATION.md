@@ -87,9 +87,9 @@ overlays beyond §5.4, scheduling by time of day.
   bottom field first); rate 23.98–60. Optionally overridable per output
   (`outputs[n].format`) — then items are converted for each format they are used
   in (§6.3).
-- Interlaced representation in MXL follows what mxl-decklink and
-  mxl-st2110-gateway use for 1080i (grain = frame, field order in `flow_def.json`);
-  verify against those repos and the pinned MXL.
+- Interlaced representation in MXL: each grain is one field (not a frame), the
+  field order is `interlace_mode` in `flow_def.json`, as in mxl-decklink and
+  mxl-st2110-gateway with the pinned MXL:
   - Pinned MXL `218ddaa` stores an interlaced flow as fields: each grain is one field
     of `height / 2` lines, at twice the definition's `grain_rate`. Grain 2k is the
     first field of frame k in time and grain 2k+1 the second (the writer requirement

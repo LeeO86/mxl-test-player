@@ -394,7 +394,6 @@ void render_raster(const PatternRequest& req, int w, int h, bool flash, std::uin
     r.pack(v210);
 }
 
-
 bool flash_of(const PatternRequest& req) {
     return req.flash || (req.pattern == VideoPattern::AvSync && is_sync_frame(req.frame_index, req.format.frame_rate));
 }
