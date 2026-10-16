@@ -278,6 +278,11 @@ is kept (configurable retention) so changing the platform format later is possib
   SMPTE 12M timecode as ATC in ANC (SMPTE 12M-2, DID 0x60 / SDID 0x60), in the
   RFC 8331 payload layout used by mxl-decklink and mxl-st2110-gateway (verify the
   exact grain payload format against those repos and reuse it).
+- Grain layout (1.2.4), as MXL documents it (docs/Architecture.md, `video/smpte291`):
+  the RFC 8331 payload from the Length field on, without the RTP header and the
+  extended sequence number: Length (16 bits) at byte 0, ANC_Count (8), F (2),
+  reserved (22), then the ATC packet at byte 6. The rest of the 4096-byte grain is
+  zero.
 - Timecode source per output: `tai` (time of day from TAI at the output rate,
   default), `utc`/`local` time of day, `media` (timecode embedded in the item,
   falling back to 00:00:00:00 at item start), `free` (counts from a preset value).

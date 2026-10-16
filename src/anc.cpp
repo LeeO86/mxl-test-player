@@ -139,15 +139,15 @@ std::vector<std::uint8_t> encode_anc_grain(const AncPacket& pkt) {
     bw.align32();
 
     const int f = !pkt.interlaced ? 0 : (pkt.tc.field ? 0x3 : 0x2);
+    // MXL stores the RFC 8331 payload from the Length field on: Length(16) ANC_Count(8) F(2)
+    // reserved(22), then the packets at byte 6.
     std::vector<std::uint8_t> grain(kAncGrainSize, 0);
-    grain[0] = static_cast<std::uint8_t>(pkt.sequence >> 8);
-    grain[1] = static_cast<std::uint8_t>(pkt.sequence);
     const std::uint16_t length = static_cast<std::uint16_t>(anc_bytes.size());
-    grain[2] = static_cast<std::uint8_t>(length >> 8);
-    grain[3] = static_cast<std::uint8_t>(length);
-    grain[4] = 1;  // ANC_Count
-    grain[5] = static_cast<std::uint8_t>(f << 6);
-    std::memcpy(grain.data() + 8, anc_bytes.data(), std::min(anc_bytes.size(), grain.size() - 8));
+    grain[0] = static_cast<std::uint8_t>(length >> 8);
+    grain[1] = static_cast<std::uint8_t>(length);
+    grain[2] = 1;  // ANC_Count
+    grain[3] = static_cast<std::uint8_t>(f << 6);
+    std::memcpy(grain.data() + kAncHeaderSize, anc_bytes.data(), std::min(anc_bytes.size(), grain.size() - kAncHeaderSize));
     return grain;
 }
 
@@ -159,17 +159,16 @@ AncPacket anc_packet_for_grain(std::uint64_t index, const VideoFormat& fmt, cons
     // 1125-line interlace (SMPTE ST 274): the second field's lines are 563 to 1125, so line 10 of
     // the first field is line 572 in the second.
     if (pkt.interlaced && (index & 1u)) pkt.line += 562;
-    pkt.sequence = static_cast<std::uint16_t>(index);
     return pkt;
 }
 
 bool decode_anc_timecode(const std::uint8_t* grain, std::size_t size, Timecode& out, AtcKind& kind) {
     if (size < 16) return false;
-    const int count = grain[4];
+    const int count = grain[2];
     if (count < 1) return false;
-    const std::uint16_t length = static_cast<std::uint16_t>((grain[2] << 8) | grain[3]);
-    if (static_cast<std::size_t>(8 + length) > size) return false;
-    BitReader br(grain + 8, length);
+    const std::uint16_t length = static_cast<std::uint16_t>((grain[0] << 8) | grain[1]);
+    if (kAncHeaderSize + length > size) return false;
+    BitReader br(grain + kAncHeaderSize, length);
     if (br.get(32) < 0) return false;
     auto read10 = [&]() { return br.get(10); };
     const int did = read10();
@@ -205,7 +204,7 @@ bool decode_anc_timecode(const std::uint8_t* grain, std::size_t size, Timecode& 
     out.hh = (ht & 0x3) * 10 + (hu & 0xF);
     out.drop = (ft & 0x4) != 0;
     out.field = (ht & 0x8) ? 1 : 0;
-    const int f = (grain[5] >> 6) & 0x3;
+    const int f = (grain[3] >> 6) & 0x3;
     if (f == 0x3) out.field = 1;
     else if (f == 0x2) out.field = 0;
     return true;

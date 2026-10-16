@@ -7,16 +7,18 @@
 
 namespace mtp {
 
-// RFC 8331 payload (no RTP header) carrying one SMPTE ST 12-2 ATC packet.
-// The MXL video/smpte291 grain is 4096 bytes; unused bytes stay zero.
+// RFC 8331 payload carrying one SMPTE ST 12-2 ATC packet, stored as MXL documents it
+// (docs/Architecture.md): from the Length field on, without the RTP header and the extended
+// sequence number. The MXL video/smpte291 grain is 4096 bytes; unused bytes stay zero.
 constexpr std::size_t kAncGrainSize = 4096;
+// Length(16) ANC_Count(8) F(2) reserved(22); the packets start at this byte.
+constexpr std::size_t kAncHeaderSize = 6;
 
 struct AncPacket {
     Timecode tc;
     AtcKind kind = AtcKind::Ltc;
     int line = 10;
     bool interlaced = false;
-    std::uint16_t sequence = 0;
 };
 
 std::vector<std::uint8_t> encode_anc_grain(const AncPacket& pkt);
