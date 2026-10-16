@@ -594,6 +594,57 @@ TEST_CASE("drop frame timecode and anc roundtrip") {
     CHECK(back.field == 1);
 }
 
+TEST_CASE("interlaced ANC runs at the field rate: one grain per field at the video field's index") {
+    const Uuid id = uuid_from_seed("anc-flow");
+    auto rate = [&](const char* format) {
+        const auto def = nlohmann::json::parse(data_flow_json(id, "Out 1 data", "Out 1", *parse_format(format), id, id));
+        return Rational{def["grain_rate"]["numerator"].get<std::int64_t>(), def["grain_rate"]["denominator"].get<std::int64_t>()};
+    };
+    // Twice the frame rate the video flow declares (MXL doubles that one itself).
+    CHECK(rate("1080i25") == Rational{50, 1});
+    CHECK(rate("1080i25bff") == Rational{50, 1});
+    CHECK(rate("1080i29.97") == Rational{60000, 1001});
+    CHECK(rate("1080p25") == Rational{25, 1});  // progressive unchanged
+    CHECK(rate("1080p59.94") == Rational{60000, 1001});
+
+    auto field_of = [](const std::vector<std::uint8_t>& g) { return g[5] >> 6; };
+    auto line_of = [](const std::vector<std::uint8_t>& g) {
+        const std::uint32_t h = (std::uint32_t{g[8]} << 24) | (std::uint32_t{g[9]} << 16) | (std::uint32_t{g[10]} << 8) | g[11];
+        return static_cast<int>((h >> 20) & 0x7FFu);
+    };
+    auto sequence_of = [](const std::vector<std::uint8_t>& g) { return (g[0] << 8) | g[1]; };
+
+    // Grains 2k and 2k+1 carry frame k's timecode; the second has the field flag, F = 0b11 and a field-2 line.
+    const VideoFormat fmt = *parse_format("1080i25");
+    TimecodeQuery q;
+    q.source = TcSource::Media;
+    q.media_start_frame = 100;
+    const std::uint64_t k = 7;
+    const auto g1 = encode_anc_grain(anc_packet_for_grain(2 * k, fmt, timecode_for_grain(2 * k, fmt, q), AtcKind::Ltc));
+    const auto g2 = encode_anc_grain(anc_packet_for_grain(2 * k + 1, fmt, timecode_for_grain(2 * k + 1, fmt, q), AtcKind::Ltc));
+    CHECK(field_of(g1) == 0x2);
+    CHECK(field_of(g2) == 0x3);
+    CHECK(line_of(g1) == 10);
+    CHECK(line_of(g2) == 572);
+    CHECK(sequence_of(g1) == 14);
+    CHECK(sequence_of(g2) == 15);
+    Timecode t1, t2;
+    AtcKind kind = AtcKind::Ltc;
+    REQUIRE(decode_anc_timecode(g1.data(), g1.size(), t1, kind));
+    REQUIRE(decode_anc_timecode(g2.data(), g2.size(), t2, kind));
+    CHECK(t1.format() == "00:00:04:07");
+    CHECK(t2.format() == t1.format());
+    CHECK(t1.field == 0);
+    CHECK(t2.field == 1);
+
+    // Progressive: F = 0b00, line 10, the frame index as the sequence number.
+    const VideoFormat p = *parse_format("1080p25");
+    const auto gp = encode_anc_grain(anc_packet_for_grain(15, p, timecode_for_grain(15, p, q), AtcKind::Ltc));
+    CHECK(field_of(gp) == 0);
+    CHECK(line_of(gp) == 10);
+    CHECK(sequence_of(gp) == 15);
+}
+
 TEST_CASE("moving box is a pure function of the grain index") {
     VideoFormat fmt = *parse_format("1080p50");
     MotionParams m;

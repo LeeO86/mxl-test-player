@@ -151,6 +151,18 @@ std::vector<std::uint8_t> encode_anc_grain(const AncPacket& pkt) {
     return grain;
 }
 
+AncPacket anc_packet_for_grain(std::uint64_t index, const VideoFormat& fmt, const Timecode& tc, AtcKind kind) {
+    AncPacket pkt;
+    pkt.tc = tc;
+    pkt.kind = kind;
+    pkt.interlaced = fmt.interlaced();
+    // 1125-line interlace (SMPTE ST 274): the second field's lines are 563 to 1125, so line 10 of
+    // the first field is line 572 in the second.
+    if (pkt.interlaced && (index & 1u)) pkt.line += 562;
+    pkt.sequence = static_cast<std::uint16_t>(index);
+    return pkt;
+}
+
 bool decode_anc_timecode(const std::uint8_t* grain, std::size_t size, Timecode& out, AtcKind& kind) {
     if (size < 16) return false;
     const int count = grain[4];

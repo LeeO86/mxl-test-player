@@ -274,8 +274,10 @@ std::string data_flow_json(const Uuid& id, const std::string& label, const std::
     s += "  \"format\": \"urn:x-nmos:format:data\",\n";
     s += "  \"media_type\": \"video/smpte291\",\n";
     s += "  \"tags\": {\"urn:x-nmos:tag:grouphint/v1.0\": [\"" + json_escape(safe_group(group)) + ":Data\"]},\n";
-    s += "  \"grain_rate\": {\"numerator\": " + std::to_string(fmt.frame_rate.num) + ", \"denominator\": " +
-         std::to_string(fmt.frame_rate.den) + "},\n";
+    // ANC of an interlaced format runs at the field rate (2x the frame rate), one grain per field
+    // at the video field's index; the video flow declares the frame rate and MXL doubles it.
+    const Rational gr = fmt.grain_rate();
+    s += "  \"grain_rate\": {\"numerator\": " + std::to_string(gr.num) + ", \"denominator\": " + std::to_string(gr.den) + "},\n";
     s += "  \"source_id\": \"" + source_id.str() + "\",\n";
     s += "  \"device_id\": \"" + device_id.str() + "\",\n";
     s += "  \"parents\": []\n}\n";

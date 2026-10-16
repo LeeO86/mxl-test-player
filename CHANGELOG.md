@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.2.3
+
+### Fixes
+
+- **The ANC timecode flow of an interlaced format runs at the field rate.** At `1080i25` and `1080i29.97` (tff and bff) the `video/smpte291` data flow was declared at the frame rate (25/1, 30000/1001) but written at the video's field index, so its grain index was about twice the TAI index of its own rate, and a reader that asks for the TAI index of the declared rate (mxl-decklink playout ANC, mxl-st2110-gateway ANC egress) got nothing or the wrong grain. Following the shared interlaced convention (MXL 218ddaa), the data flow is now declared at twice the frame rate (`grain_rate` 50/1 at 1080i25, 60000/1001 at 1080i29.97, in `flow_def.json` and the NMOS flow), and grain 2k carries the first field's ATC packet and 2k+1 the second field's, at the same index as the video field. Progressive formats are unchanged.
+- **The second field's packet has a second-field line number.** Each field's packet had RFC 8331 line 10; the second field's is now line 572 (line 10 of field 2 in the 1125-line raster, SMPTE ST 274). Unchanged: both fields carry the frame's timecode, the second with the field flag set, the RFC 8331 field bits `F` are 0b10 on the first field and 0b11 on the second, and the sequence number is the grain index (low 16 bits), which now counts the data flow's own grains.
+- Lab (1080i25, one output): the data flow's head equals `mxlGetCurrentIndex(50/1)`; grain 2k has F 0b10 and line 10, grain 2k+1 F 0b11 and line 572; the NMOS data flow says 50/1.
+- New unit test: the data flow's rate per format, and the field bits, line, sequence and timecode of the packets of grains 2k and 2k+1 (and of a progressive grain).
+- **Upgrade:** a data flow left in the domain by an older version that did not exit cleanly (SIGKILL, a crash) keeps its 25/1 definition, because MXL opens an existing flow as it is. Remove the output domain (or that flow) once if the flow still says 25/1 after the upgrade.
+- The Compose and Kubernetes examples use the `1.2.3` image.
+
 ## 1.2.2
 
 - New formats for bottom field first: `1080i25bff` and `1080i29.97bff` (`PLAYER_FORMAT`, an output's `format`, the web UI's format list). `1080i25` and `1080i29.97` stay top field first (also accepted as `1080i25tff`, same name and flow ids). Before, every interlaced format was tff.
