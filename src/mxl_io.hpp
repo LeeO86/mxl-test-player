@@ -84,7 +84,7 @@ struct GrainProbe {
     int cb = 0;
     int cr = 0;
     std::uint64_t fnv = 0;
-    std::vector<std::uint8_t> head;  // first 64 bytes
+    std::vector<std::uint8_t> head;  // first min(grain size, 4096) bytes
 };
 
 GrainProbe read_grain(MxlSession& session, const std::string& flow_id, std::uint64_t index, int width, int height, int timeout_ms);

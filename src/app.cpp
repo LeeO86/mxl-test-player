@@ -526,13 +526,8 @@ void App::Impl::handle(const HttpRequest& req, HttpResponse& res) {
                 Timecode tc;
                 AtcKind kind = AtcKind::Ltc;
                 std::string tc_s;
-                if (anc.ok) {
-                    if (decode_anc_timecode(anc.head.data(), anc.head.size(), tc, kind) ||
-                        (anc.head.size() >= 16 && decode_anc_timecode(anc.head.data(), 4096, tc, kind))) {
-                        tc_s = tc.format();
-                    }
-                }
-                // The probe head is only 64 bytes; re-read is limited. Decode from head if the header fits.
+                // The probe head holds the grain's first min(grain size, 4096) bytes: the whole ANC grain.
+                if (anc.ok && decode_anc_timecode(anc.head.data(), anc.head.size(), tc, kind)) tc_s = tc.format();
                 text(json{{"ok", video.ok},
                           {"index", index},
                           {"y", video.y},
