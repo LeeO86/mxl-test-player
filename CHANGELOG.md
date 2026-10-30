@@ -2,6 +2,11 @@
 
 ## 1.3.0 (unreleased)
 
+### Breaking
+
+- **The `v210a` alpha plane of patterns, videos and black now follows `idle_key`** (default `opaque`, 1023; it was 0). An output that feeds a keyer with graphics must set `idle_key: transparent`, or the keyer sees an opaque frame under the graphics.
+- **`include_in_key` of the moving box is ignored**: every moving box (and every other burn-in) is in the key.
+
 ### Fixes
 
 - **Burn-ins go into the key.** On a `v210a` output the alpha plane was never drawn on, so every burn-in (moving box, sprite, text, the standard burn-ins) was in the fill but vanished in a downstream keyer; on a `fill_key` output only a moving box with "include in key" went into the key, text never. Now every burn-in drawn on the fill is also drawn into the alpha (the `v210a` alpha plane, or the `fill_key` key at `key_min`..`key_max`) with its own opacity, composited "over": `a_out = a_src + a_dst · (1 − a_src)`. The fill stays straight alpha (`(c_src · a_src + c_dst · a_dst · (1 − a_src)) / a_out`), so a burn-in over a transparent background has its own colour, not a darkened one; over a still converted as `premultiplied` the fill is blended premultiplied. Outputs without a key (`key_mode` `off`) are drawn exactly as before.
