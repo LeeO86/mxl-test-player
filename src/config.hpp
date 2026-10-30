@@ -46,7 +46,6 @@ struct MovingBoxConfig {
     std::string content = "builtin";  // "builtin" or a library item id
     MotionParams motion;
     std::string color = "#FFCC00";
-    bool include_in_key = false;
 };
 
 struct BurnInConfig {

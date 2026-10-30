@@ -169,7 +169,10 @@ if(PLAYER_BUILD_TESTS)
     add_executable(player_tests tests/test_player.cpp)
     target_include_directories(player_tests PRIVATE third_party/doctest)
     target_link_libraries(player_tests PRIVATE player_core)
-    target_compile_definitions(player_tests PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN)
+    target_compile_definitions(player_tests PRIVATE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN MTP_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    # Lab tool of tests/integration/keying.py: one grain's payload as a reader gets it.
+    add_executable(player_grain_dump tests/tools/grain_dump.cpp)
+    target_link_libraries(player_grain_dump PRIVATE mxl::mxl)
 endif()
 
 install(TARGETS mxl-test-player RUNTIME DESTINATION bin)

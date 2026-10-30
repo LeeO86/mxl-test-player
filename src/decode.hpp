@@ -3,6 +3,7 @@
 #include "format.hpp"
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -14,18 +15,51 @@ struct RgbaBuffer {
     std::vector<std::uint8_t> px;
 };
 
-struct SpriteSequence {
-    int w = 0;
-    int h = 0;
-    std::vector<RgbaBuffer> frames;
-    std::vector<double> durations;
-};
-
 enum class ScaleMode { Fit, Fill, Center, SpriteMax };
 
-// Decode the first image (or the whole animation) to RGBA.
-// `box_w/box_h` is the target canvas. SpriteMax scales so the longest side is box_w.
-bool decode_visual(const std::string& path, ScaleMode mode, int box_w, int box_h, SpriteSequence& out, std::string& error);
+// Bounds of an image or animation decode. One frame is held at a time; an animation with more
+// frames, or an image with more pixels, is refused with a clear error (a small GIF can hold
+// thousands of full-size frames).
+constexpr int kMaxAnimationFrames = 1000;
+// 8K UHD (7680x4320) fits; the RGBA buffers of one frame are then at most 150 MB each.
+constexpr std::int64_t kMaxImagePixels = 8192LL * 4608LL;
+
+struct VisualInfo {
+    int w = 0;
+    int h = 0;
+    int frames = 0;
+    double total_s = 0;  // sum of the frame durations
+};
+
+// The codec name of the file's video stream ("gif", "png", "h264", …), read with libavformat; empty
+// when it has none. Used when ffprobe gives nothing.
+std::string probe_video_codec(const std::string& path);
+
+// Size, frame count and duration of an image or animation from its packets, without decoding.
+bool probe_visual(const std::string& path, VisualInfo& info, std::string& error);
+
+// Decodes every frame once, in order, to RGBA at the source size (FFmpeg composites GIF and
+// APNG frames onto the canvas, with transparency), and calls `on_frame` with the frame and its
+// duration in seconds (0.1 when the file has none or a GIF says 10 ms or less). `on_frame` returns false to stop. Fails on a
+// decode error, an image larger than kMaxImagePixels or more than kMaxAnimationFrames frames.
+bool decode_visual_frames(const std::string& path, const std::function<bool(const RgbaBuffer&, double)>& on_frame, std::string& error);
+
+// Scales RGBA (bilinear, premultiplied; the result is straight, RGB 0 where the alpha is 0) onto
+// a canvas: Fit, Fill or Center in box_w x box_h, transparent around it; SpriteMax so the longest
+// side is at most box_w (the canvas is the scaled size).
+class RgbaFitter {
+public:
+    RgbaFitter() = default;
+    ~RgbaFitter();
+    RgbaFitter(const RgbaFitter&) = delete;
+    RgbaFitter& operator=(const RgbaFitter&) = delete;
+    void fit(const RgbaBuffer& src, ScaleMode mode, int box_w, int box_h, RgbaBuffer& out);
+
+private:
+    void* sws_ = nullptr;
+    std::vector<std::uint8_t> premul_;
+    std::vector<std::uint8_t> scaled_;
+};
 
 struct RamClip {
     int width = 0;

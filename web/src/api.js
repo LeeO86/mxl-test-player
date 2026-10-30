@@ -163,6 +163,7 @@ export const PATTERN_GROUPS = [
       { value: "green", label: "Green" },
       { value: "blue", label: "Blue" },
       { value: "grey50", label: "Grey 50 %" },
+      { value: "transparent", label: "Transparent (alpha 0)" },
     ],
   },
   {
@@ -277,5 +278,5 @@ export function newTextLayer() {
   };
 }
 export function newBox() {
-  return { enabled: true, content: "builtin", path: "bounce", speed: 0.15, size: 0.12, opacity: 1, color: "#FFCC00", include_in_key: false, start_x: 0, start_y: 0 };
+  return { enabled: true, content: "builtin", path: "bounce", speed: 0.15, size: 0.12, opacity: 1, color: "#FFCC00", start_x: 0, start_y: 0 };
 }

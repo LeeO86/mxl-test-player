@@ -212,4 +212,187 @@ void restore_v210_rect(std::uint8_t* dst, const std::uint8_t* src, int width, in
     }
 }
 
+namespace {
+
+// Scratch rows of composite_rgba_over_alpha, kept per thread so the writer does not allocate.
+struct OverScratch {
+    std::vector<std::uint16_t> y, cb, cr, ky, kcb, kcr;
+    std::vector<float> sa, sy, scb, scr, da, oa;
+};
+
+void unpack_groups(const std::uint32_t* w, int groups, std::uint16_t* y, std::uint16_t* cb, std::uint16_t* cr) {
+    for (int g = 0; g < groups; ++g, w += 4) {
+        const int x = g * 6;
+        const int c = g * 3;
+        cb[c] = static_cast<std::uint16_t>(w[0] & 0x3FF);
+        y[x] = static_cast<std::uint16_t>((w[0] >> 10) & 0x3FF);
+        cr[c] = static_cast<std::uint16_t>((w[0] >> 20) & 0x3FF);
+        y[x + 1] = static_cast<std::uint16_t>(w[1] & 0x3FF);
+        cb[c + 1] = static_cast<std::uint16_t>((w[1] >> 10) & 0x3FF);
+        y[x + 2] = static_cast<std::uint16_t>((w[1] >> 20) & 0x3FF);
+        cr[c + 1] = static_cast<std::uint16_t>(w[2] & 0x3FF);
+        y[x + 3] = static_cast<std::uint16_t>((w[2] >> 10) & 0x3FF);
+        cb[c + 2] = static_cast<std::uint16_t>((w[2] >> 20) & 0x3FF);
+        y[x + 4] = static_cast<std::uint16_t>(w[3] & 0x3FF);
+        cr[c + 2] = static_cast<std::uint16_t>((w[3] >> 10) & 0x3FF);
+        y[x + 5] = static_cast<std::uint16_t>((w[3] >> 20) & 0x3FF);
+    }
+}
+
+void pack_groups(std::uint32_t* w, int groups, const std::uint16_t* y, const std::uint16_t* cb, const std::uint16_t* cr) {
+    auto v = [](std::uint16_t s) { return static_cast<std::uint32_t>(s & 0x3FFu); };
+    for (int g = 0; g < groups; ++g, w += 4) {
+        const int x = g * 6;
+        const int c = g * 3;
+        w[0] = v(cb[c]) | (v(y[x]) << 10) | (v(cr[c]) << 20);
+        w[1] = v(y[x + 1]) | (v(cb[c + 1]) << 10) | (v(y[x + 2]) << 20);
+        w[2] = v(cr[c + 1]) | (v(y[x + 3]) << 10) | (v(cb[c + 2]) << 20);
+        w[3] = v(y[x + 4]) | (v(cr[c + 2]) << 10) | (v(y[x + 5]) << 20);
+    }
+}
+
+std::uint16_t code10(double v) { return static_cast<std::uint16_t>(std::clamp(static_cast<int>(v + 0.5), 4, 1019)); }
+
+}  // namespace
+
+void composite_rgba_over_alpha(std::uint8_t* v210, const AlphaTarget& alpha, int width, int height, int x0, int y0, int bw, int bh,
+                               const std::uint8_t* rgba, double opacity, bool premultiplied) {
+    if (alpha.kind == AlphaTarget::Kind::None || !alpha.data) {
+        composite_rgba_onto_v210(v210, width, height, x0, y0, bw, bh, rgba, opacity);
+        return;
+    }
+    if (bw <= 0 || bh <= 0 || opacity <= 0.0) return;
+    const int xa = std::max(0, x0);
+    const int xb = std::min(width, x0 + bw);
+    if (xa >= xb) return;
+    const int g0 = xa / 6;
+    const int groups = (xb + 5) / 6 - g0;
+    const int px0 = g0 * 6;
+    const int span = groups * 6;
+    const std::uint32_t stride = v210_line_stride(width);
+    const std::uint32_t astride = alpha10_line_stride(width);
+    const bool key = alpha.kind == AlphaTarget::Kind::Key;
+    const double krange = std::max(1, alpha.key_max - alpha.key_min);
+    thread_local OverScratch s;
+    const auto n = static_cast<std::size_t>(span);
+    if (s.y.size() < n) {
+        for (auto* v : {&s.y, &s.ky}) v->resize(n);
+        for (auto* v : {&s.cb, &s.cr, &s.kcb, &s.kcr}) v->resize(n / 2);
+        for (auto* v : {&s.sa, &s.sy, &s.scb, &s.scr, &s.da, &s.oa}) v->resize(n);
+    }
+    float alpha_of[256];
+    for (int v = 0; v < 256; ++v) alpha_of[v] = static_cast<float>((v / 255.0) * opacity);
+    std::uint32_t last_rgb = 0xFFFFFFFFu;
+    Yuv10 over{};
+    for (int row = 0; row < bh; ++row) {
+        const int dy = y0 + row;
+        if (dy < 0 || dy >= height) continue;
+        // The layer's alpha and colour for every pixel of the groups (0 outside the box).
+        bool any = false;
+        for (int i = 0; i < span; ++i) {
+            const int dx = px0 + i;
+            const int col = dx - x0;
+            s.sa[i] = 0;
+            if (dx < xa || dx >= xb || col < 0 || col >= bw) continue;
+            const std::uint8_t* p = rgba + (static_cast<std::size_t>(row) * static_cast<std::size_t>(bw) + col) * 4u;
+            const float a = alpha_of[p[3]];
+            if (a <= 0.001f) continue;
+            const std::uint32_t rgb = p[0] | (static_cast<std::uint32_t>(p[1]) << 8) | (static_cast<std::uint32_t>(p[2]) << 16);
+            if (rgb != last_rgb) {
+                over = rgb_to_yuv709(p[0] / 255.0, p[1] / 255.0, p[2] / 255.0);
+                last_rgb = rgb;
+            }
+            s.sa[i] = a;
+            s.sy[i] = static_cast<float>(over.y);
+            s.scb[i] = static_cast<float>(over.cb);
+            s.scr[i] = static_cast<float>(over.cr);
+            any = true;
+        }
+        if (!any) continue;
+        auto* words = reinterpret_cast<std::uint32_t*>(v210 + static_cast<std::size_t>(dy) * stride) + static_cast<std::size_t>(g0) * 4;
+        unpack_groups(words, groups, s.y.data(), s.cb.data(), s.cr.data());
+        std::uint32_t* kwords = nullptr;
+        std::uint32_t* awords = nullptr;
+        if (key) {
+            kwords = reinterpret_cast<std::uint32_t*>(alpha.data + static_cast<std::size_t>(dy) * stride) + static_cast<std::size_t>(g0) * 4;
+            unpack_groups(kwords, groups, s.ky.data(), s.kcb.data(), s.kcr.data());
+            for (int i = 0; i < span; ++i) s.da[i] = static_cast<float>(std::clamp((s.ky[i] - alpha.key_min) / krange, 0.0, 1.0));
+        } else {
+            awords = reinterpret_cast<std::uint32_t*>(alpha.data + static_cast<std::size_t>(dy) * astride);
+            for (int i = 0; i < span; ++i) {
+                const int dx = px0 + i;
+                s.da[i] = dx < width ? static_cast<float>(((awords[dx / 3] >> ((dx % 3) * 10)) & 0x3FFu) / 1023.0) : 0.f;
+            }
+        }
+        // Luma and alpha per pixel.
+        for (int i = 0; i < span; ++i) {
+            const float sa = s.sa[i];
+            const float da = s.da[i];
+            s.oa[i] = da;
+            if (sa <= 0) continue;
+            const float oa = sa + da * (1.f - sa);
+            s.oa[i] = oa;
+            const double yd = s.y[i];
+            s.y[i] = premultiplied ? code10(s.sy[i] * sa + yd * (1.0 - sa)) : code10((s.sy[i] * sa + yd * da * (1.0 - sa)) / oa);
+        }
+        // Chroma once per pair, with the pair's mean alphas (taken before this layer).
+        for (int c = 0; c < span / 2; ++c) {
+            const float s0 = s.sa[2 * c];
+            const float s1 = s.sa[2 * c + 1];
+            const float ssum = s0 + s1;
+            if (ssum <= 0) continue;
+            const double sa = ssum / 2.0;
+            const double da = (s.da[2 * c] + s.da[2 * c + 1]) / 2.0;
+            const double cbs = (s.scb[2 * c] * s0 + s.scb[2 * c + 1] * s1) / ssum;
+            const double crs = (s.scr[2 * c] * s0 + s.scr[2 * c + 1] * s1) / ssum;
+            if (premultiplied) {
+                s.cb[c] = code10(cbs * sa + s.cb[c] * (1.0 - sa));
+                s.cr[c] = code10(crs * sa + s.cr[c] * (1.0 - sa));
+            } else {
+                const double oa = sa + da * (1.0 - sa);
+                s.cb[c] = code10((cbs * sa + s.cb[c] * da * (1.0 - sa)) / oa);
+                s.cr[c] = code10((crs * sa + s.cr[c] * da * (1.0 - sa)) / oa);
+            }
+        }
+        pack_groups(words, groups, s.y.data(), s.cb.data(), s.cr.data());
+        if (key) {
+            for (int i = 0; i < span; ++i)
+                if (s.sa[i] > 0) s.ky[i] = static_cast<std::uint16_t>(alpha_to_key(s.oa[i], alpha.key_min, alpha.key_max));
+            pack_groups(kwords, groups, s.ky.data(), s.kcb.data(), s.kcr.data());
+        } else {
+            for (int i = 0; i < span; ++i) {
+                const int dx = px0 + i;
+                if (s.sa[i] <= 0 || dx >= width) continue;
+                const auto a10 = static_cast<std::uint32_t>(std::clamp(static_cast<int>(s.oa[i] * 1023.0 + 0.5), 0, 1023));
+                const int shift = (dx % 3) * 10;
+                awords[dx / 3] = (awords[dx / 3] & ~(0x3FFu << shift)) | (a10 << shift);
+            }
+        }
+    }
+}
+
+void restore_a10_rect(std::uint8_t* dst, const std::uint8_t* src, int width, int height, int x, int y, int bw, int bh) {
+    const int xa = std::max(0, x);
+    const int xb = std::min(width, x + bw);
+    const int ya = std::max(0, y);
+    const int yb = std::min(height, y + bh);
+    if (bw <= 0 || bh <= 0 || xa >= xb || ya >= yb) return;
+    const std::size_t stride = alpha10_line_stride(width);
+    // The pixels composite_rgba_over_alpha can change: its 6-pixel groups, clipped to the line.
+    const int pa = (xa / 6) * 6;
+    const int pb = std::min(width, ((xb + 5) / 6) * 6);
+    const std::size_t b0 = static_cast<std::size_t>(pa / 3) * 4;
+    const std::size_t b1 = std::min(stride, static_cast<std::size_t>((pb + 2) / 3) * 4);
+    for (int row = ya; row < yb; ++row) {
+        const std::size_t at = static_cast<std::size_t>(row) * stride;
+        std::memcpy(dst + at + b0, src + at + b0, b1 - b0);
+    }
+}
+
+void fill_alpha10(std::uint8_t* dst, int width, int height, int a) {
+    std::vector<std::uint16_t> line(static_cast<std::size_t>(width), static_cast<std::uint16_t>(std::clamp(a, 0, 1023)));
+    const std::uint32_t stride = alpha10_line_stride(width);
+    for (int row = 0; row < height; ++row) pack_alpha10_line(line.data(), width, dst + static_cast<std::size_t>(row) * stride);
+}
+
 }  // namespace mtp

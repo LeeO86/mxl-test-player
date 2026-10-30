@@ -104,7 +104,7 @@ MovingBoxConfig box_from_json(const json& j) {
     if (j.contains("enabled")) b.enabled = j.at("enabled").get<bool>();
     if (j.contains("content")) b.content = j.at("content").get<std::string>();
     if (j.contains("color")) b.color = j.at("color").get<std::string>();
-    if (j.contains("include_in_key")) b.include_in_key = j.at("include_in_key").get<bool>();
+    // `include_in_key` (before 1.3.0) is ignored: every burn-in goes into the key and the alpha.
     if (j.contains("path")) b.motion.path = parse_motion_path(j.at("path").get<std::string>());
     if (j.contains("speed")) b.motion.speed = j.at("speed").get<double>();
     if (j.contains("size")) b.motion.size = j.at("size").get<double>();
@@ -206,7 +206,6 @@ nlohmann::json burnin_to_json(const BurnInConfig& b) {
         boxes.push_back(nlohmann::json{{"enabled", box.enabled},
                                        {"content", box.content},
                                        {"color", box.color},
-                                       {"include_in_key", box.include_in_key},
                                        {"path", motion_path_name(box.motion.path)},
                                        {"speed", box.motion.speed},
                                        {"size", box.motion.size},

@@ -8,6 +8,7 @@
 #include "media.hpp"
 #include "motion.hpp"
 #include "nmos.hpp"
+#include "overlay.hpp"
 #include "output.hpp"
 #include "mxl_io.hpp"
 #include "pattern.hpp"
@@ -204,6 +205,162 @@ TEST_CASE("restoring the composited boxes gives back the frame under the overlay
     CHECK(still_pattern(req).data == nullptr);
 }
 
+namespace {
+int a10_at(const std::vector<std::uint8_t>& plane, int width, int x, int y) {
+    std::vector<std::uint16_t> a(static_cast<std::size_t>(width));
+    unpack_alpha10_line(plane.data() + static_cast<std::size_t>(y) * alpha10_line_stride(width), width, a.data());
+    return a[static_cast<std::size_t>(x)];
+}
+int luma_at(const std::vector<std::uint8_t>& frame, int width, int x, int y) {
+    std::vector<std::uint16_t> l(static_cast<std::size_t>(width)), cb(static_cast<std::size_t>(width / 2)), cr(static_cast<std::size_t>(width / 2));
+    unpack_v210_line(frame.data() + static_cast<std::size_t>(y) * v210_line_stride(width), width, l.data(), cb.data(), cr.data());
+    return l[static_cast<std::size_t>(x)];
+}
+std::vector<std::uint8_t> solid_rgba(int w, int h, std::uint8_t r, std::uint8_t g, std::uint8_t b, std::uint8_t a) {
+    std::vector<std::uint8_t> px(static_cast<std::size_t>(w) * h * 4);
+    for (std::size_t i = 0; i < px.size(); i += 4) {
+        px[i] = r;
+        px[i + 1] = g;
+        px[i + 2] = b;
+        px[i + 3] = a;
+    }
+    return px;
+}
+}  // namespace
+
+TEST_CASE("burn-ins go over the alpha: a_out = a_src + a_dst * (1 - a_src), the fill stays straight") {
+    const int width = 96, height = 4;
+    // Three columns of destination alpha: transparent, half, opaque (v210a codes 0, 512, 1023).
+    std::vector<std::uint8_t> fill(v210_size(width, height));
+    fill_v210(fill.data(), width, height, kYBlack, kCMid, kCMid);
+    std::vector<std::uint8_t> a10(alpha10_size(width, height));
+    std::vector<std::uint16_t> line(static_cast<std::size_t>(width));
+    for (int x = 0; x < width; ++x) line[static_cast<std::size_t>(x)] = x < 32 ? 0 : x < 64 ? 512 : 1023;
+    for (int y = 0; y < height; ++y) pack_alpha10_line(line.data(), width, a10.data() + static_cast<std::size_t>(y) * alpha10_line_stride(width));
+    // White at alpha 128/255 and layer opacity 0.6: a_src = 0.3012.
+    const auto white = solid_rgba(width, height, 255, 255, 255, 128);
+    const double as = 128 / 255.0 * 0.6;
+    AlphaTarget target{AlphaTarget::Kind::A10, a10.data(), kYBlack, kYWhite};
+    composite_rgba_over_alpha(fill.data(), target, width, height, 0, 0, width, height, white.data(), 0.6, false);
+    for (int x : {5, 40, 80}) {
+        const double ad = (x < 32 ? 0 : x < 64 ? 512 : 1023) / 1023.0;
+        const double ao = as + ad * (1 - as);
+        CHECK(a10_at(a10, width, x, 2) == static_cast<int>(ao * 1023 + 0.5));
+        // Straight fill: (c_src a_src + c_dst a_dst (1 - a_src)) / a_out.
+        const double yexp = (940 * as + 64 * ad * (1 - as)) / ao;
+        CHECK(std::abs(luma_at(fill, width, x, 2) - yexp) <= 1.0);
+    }
+    // Over a transparent background the fill is the layer's own colour, not darkened.
+    CHECK(luma_at(fill, width, 5, 0) == 940);
+    // Outside the layer nothing changes.
+    std::vector<std::uint8_t> fill2(v210_size(width, height));
+    fill_v210(fill2.data(), width, height, kYBlack, kCMid, kCMid);
+    std::vector<std::uint8_t> a2(alpha10_size(width, height));
+    AlphaTarget t2{AlphaTarget::Kind::A10, a2.data(), kYBlack, kYWhite};
+    const auto box = solid_rgba(10, 2, 255, 255, 255, 255);
+    composite_rgba_over_alpha(fill2.data(), t2, width, height, 20, 1, 10, 2, box.data(), 1.0, false);
+    CHECK(a10_at(a2, width, 19, 1) == 0);
+    CHECK(a10_at(a2, width, 20, 1) == 1023);
+    CHECK(a10_at(a2, width, 29, 2) == 1023);
+    CHECK(a10_at(a2, width, 30, 2) == 0);
+    CHECK(a10_at(a2, width, 25, 0) == 0);
+    CHECK(a10_at(a2, width, 25, 3) == 0);
+}
+
+TEST_CASE("burn-ins go over the fill_key key with the key range, and premultiplied fills blend linearly") {
+    const int width = 48, height = 2;
+    const int kmin = 64, kmax = 940;
+    std::vector<std::uint8_t> fill(v210_size(width, height));
+    fill_v210(fill.data(), width, height, kYBlack, kCMid, kCMid);
+    std::vector<std::uint8_t> key(v210_size(width, height));
+    fill_v210(key.data(), width, height, kmin, kCMid, kCMid);  // transparent
+    const auto grey = solid_rgba(width, height, 128, 128, 128, 255);
+    AlphaTarget target{AlphaTarget::Kind::Key, key.data(), kmin, kmax};
+    composite_rgba_over_alpha(fill.data(), target, width, height, 0, 0, width, height, grey.data(), 0.5, false);
+    CHECK(luma_at(key, width, 10, 1) == alpha_to_key(0.5, kmin, kmax));
+    const int grey_y = rgb_to_yuv709(128 / 255.0, 128 / 255.0, 128 / 255.0).y;
+    CHECK(luma_at(fill, width, 10, 1) == grey_y);  // straight: the colour itself
+    // A second layer at 0.5 over 0.5: 0.75.
+    composite_rgba_over_alpha(fill.data(), target, width, height, 0, 0, width, height, grey.data(), 0.5, false);
+    CHECK(luma_at(key, width, 10, 1) == alpha_to_key(0.75, kmin, kmax));
+    // Premultiplied: the fill is blended towards black like the old composite.
+    std::vector<std::uint8_t> pfill(v210_size(width, height));
+    fill_v210(pfill.data(), width, height, kYBlack, kCMid, kCMid);
+    std::vector<std::uint8_t> pkey(v210_size(width, height));
+    fill_v210(pkey.data(), width, height, kmin, kCMid, kCMid);
+    AlphaTarget pt{AlphaTarget::Kind::Key, pkey.data(), kmin, kmax};
+    composite_rgba_over_alpha(pfill.data(), pt, width, height, 0, 0, width, height, grey.data(), 0.5, true);
+    CHECK(std::abs(luma_at(pfill, width, 10, 1) - (grey_y * 0.5 + 64 * 0.5)) <= 1.0);
+    CHECK(luma_at(pkey, width, 10, 1) == alpha_to_key(0.5, kmin, kmax));
+    // Without an alpha target it is the plain composite.
+    std::vector<std::uint8_t> a(v210_size(width, height)), b(v210_size(width, height));
+    fill_v210_rgb(a.data(), width, height, 0.2, 0.4, 0.6);
+    b = a;
+    composite_rgba_over_alpha(a.data(), AlphaTarget{}, width, height, 3, 0, 20, 2, grey.data(), 0.7, false);
+    composite_rgba_onto_v210(b.data(), width, height, 3, 0, 20, 2, grey.data(), 0.7);
+    CHECK(a == b);
+}
+
+TEST_CASE("restoring the alpha plane under the composited boxes gives back the plane") {
+    const VideoFormat fmt = *parse_format("720p25");
+    std::vector<std::uint8_t> under(alpha10_size(fmt.width, fmt.height));
+    fill_alpha10(under.data(), fmt.width, fmt.height, 1023);
+    auto plane = under;
+    std::vector<std::uint8_t> fill(v210_size(fmt.width, fmt.height));
+    fill_v210(fill.data(), fmt.width, fmt.height, kYBlack, kCMid, kCMid);
+    std::uint32_t seed = 5;
+    auto rnd = [&]() { seed = seed * 1664525u + 1013904223u; return seed >> 8; };
+    struct Box { int x, y, w, h; };
+    // Transparent under-plane so every drawn pixel changes.
+    fill_alpha10(under.data(), fmt.width, fmt.height, 0);
+    plane = under;
+    const std::vector<Box> boxes{{100, 3, 301, 20}, {-17, -5, 91, 30}, {fmt.width - 50, fmt.height - 10, 120, 25}, {7, 0, 5, 720}, {1, 1, 1, 1}};
+    for (const Box& box : boxes) {
+        std::vector<std::uint8_t> rgba(static_cast<std::size_t>(box.w) * box.h * 4);
+        for (auto& v : rgba) v = static_cast<std::uint8_t>(rnd() | 0x80);
+        AlphaTarget t{AlphaTarget::Kind::A10, plane.data(), kYBlack, kYWhite};
+        composite_rgba_over_alpha(fill.data(), t, fmt.width, fmt.height, box.x, box.y, box.w, box.h, rgba.data(), 0.8, false);
+    }
+    CHECK(plane != under);
+    for (const Box& box : boxes) restore_a10_rect(plane.data(), under.data(), fmt.width, fmt.height, box.x, box.y, box.w, box.h);
+    CHECK(plane == under);
+}
+
+TEST_CASE("every burn-in writes the alpha: text and moving box on a v210a plane") {
+    const VideoFormat fmt = *parse_format("720p25");
+    std::vector<std::uint8_t> fill(v210_size(fmt.width, fmt.height));
+    fill_v210(fill.data(), fmt.width, fmt.height, kYBlack, kCMid, kCMid);
+    std::vector<std::uint8_t> a10(alpha10_size(fmt.width, fmt.height));  // transparent
+    OverlayRenderer overlay(std::string(MTP_SOURCE_DIR) + "/assets/fonts");
+    OverlayFrame of;
+    of.format = fmt;
+    of.burnin = BurnInConfig{};
+    of.burnin.label = of.burnin.timecode = of.burnin.frame_counter = of.burnin.item = of.burnin.flow_id = false;
+    TextLayerConfig t;
+    t.text = "ALPHA";
+    t.anchor = "tl";
+    t.size = 10;
+    t.box = true;
+    t.box_opacity = 0.5;
+    of.burnin.texts.push_back(t);
+    MovingBoxConfig box;
+    box.enabled = true;
+    box.motion.path = MotionPath::Horizontal;
+    box.motion.start_y = 1.0;  // bottom of the frame
+    box.motion.speed = 0;
+    box.motion.opacity = 0.6;
+    of.burnin.boxes.push_back(box);
+    std::vector<DrawnRect> rects;
+    overlay.apply(fill.data(), AlphaTarget{AlphaTarget::Kind::A10, a10.data(), kYBlack, kYWhite}, of, &rects);
+    REQUIRE(rects.size() == 2);
+    // The text's background box at 50 %, the moving box at 60 %, nothing elsewhere.
+    const DrawnRect& tr = rects[0];
+    CHECK(a10_at(a10, fmt.width, tr.x + 1, tr.y + 1) == static_cast<int>(127 / 255.0 * 1023 + 0.5));  // box alpha 127
+    const DrawnRect& br = rects[1];
+    CHECK(a10_at(a10, fmt.width, br.x + br.w / 2, br.y + 2) == static_cast<int>(0.6 * 1023 + 0.5));
+    CHECK(a10_at(a10, fmt.width, fmt.width / 2, fmt.height / 2) == 0);
+}
+
 TEST_CASE("importing the same file again keeps one library item") {
     const auto dir = std::filesystem::temp_directory_path() / "mtp-library-unit";
     std::filesystem::remove_all(dir);
@@ -227,6 +384,196 @@ TEST_CASE("importing the same file again keeps one library item") {
     cfg.library_dir = (dir / "library2").string();
     Library reloaded(cfg);
     CHECK(reloaded.list().size() == 1);
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("an animation plays at its own frame timing, mapped onto whole output frames") {
+    // 10 frames of 0.1 s: 1 s per loop.
+    const std::vector<double> even(10, 0.1);
+    CHECK(animation_loop_frames(1.0, Rational{50, 1}) == 50);
+    CHECK(animation_loop_frames(1.0, Rational{25, 1}) == 25);
+    CHECK(animation_loop_frames(1.0, Rational{60000, 1001}) == 60);
+    CHECK(animation_loop_frames(0.07, Rational{50, 1}) == 4);  // 3.5 frames, rounded
+    CHECK(animation_loop_frames(0.001, Rational{25, 1}) == 1);
+    CHECK(animation_loop_frames(0, Rational{25, 1}) == 1);
+    for (std::int64_t k = 0; k < 50; ++k) CHECK(animation_frame_at(k, 50, even.data(), 10) == static_cast<int>(k / 5));
+    CHECK(animation_frame_at(50, 50, even.data(), 10) == 0);  // the next loop
+    CHECK(animation_frame_at(-1, 50, even.data(), 10) == 9);
+    // Uneven delays (0.2, 0.04, 0.16 s) at 25p: 10 output frames, 5 + 1 + 4.
+    const std::vector<double> uneven{0.2, 0.04, 0.16};
+    const auto loop25 = animation_loop_frames(0.4, Rational{25, 1});
+    REQUIRE(loop25 == 10);
+    std::vector<int> seq;
+    for (std::int64_t k = 0; k < loop25; ++k) seq.push_back(animation_frame_at(k, loop25, uneven.data(), 3));
+    CHECK(seq == std::vector<int>{0, 0, 0, 0, 0, 1, 2, 2, 2, 2});
+    // At 59.94 the loop is 24 output frames (23.976 rounded): each frame keeps its share.
+    const auto loop5994 = animation_loop_frames(0.4, Rational{60000, 1001});
+    REQUIRE(loop5994 == 24);
+    int counts[3] = {0, 0, 0};
+    for (std::int64_t k = 0; k < loop5994; ++k) counts[animation_frame_at(k, loop5994, uneven.data(), 3)]++;
+    CHECK(counts[0] == 12);
+    CHECK(counts[1] == 3);
+    CHECK(counts[2] == 9);
+    // One frame is always frame 0.
+    CHECK(animation_frame_at(7, 25, even.data(), 1) == 0);
+}
+
+namespace {
+// A GIF89a written by hand, so the tests need no ffmpeg program (the image build has none).
+// Palette: 0 transparent (white, as many GIFs have it), 1 red, 2 green, 3 blue. Each frame is a
+// rectangle of one colour on a canvas that is kept between frames (disposal "none"), with its
+// delay in 1/100 s; the first frame should cover the canvas.
+struct GifRect {
+    int x, y, w, h;
+    std::uint8_t index;
+    int delay_cs;
+    std::vector<std::uint8_t> px;  // the rectangle's indexes, when not one colour
+};
+void write_gif(const std::string& path, int width, int height, const std::vector<GifRect>& frames) {
+    std::vector<std::uint8_t> b{'G', 'I', 'F', '8', '9', 'a'};
+    auto u16 = [&](int v) {
+        b.push_back(static_cast<std::uint8_t>(v & 0xFF));
+        b.push_back(static_cast<std::uint8_t>(v >> 8));
+    };
+    u16(width);
+    u16(height);
+    b.insert(b.end(), {0xF1, 0, 0});  // global colour table of 4 entries
+    b.insert(b.end(), {255, 255, 255, 255, 0, 0, 0, 255, 0, 0, 0, 255});
+    b.insert(b.end(), {0x21, 0xFF, 11, 'N', 'E', 'T', 'S', 'C', 'A', 'P', 'E', '2', '.', '0', 3, 1, 0, 0, 0});  // loop forever
+    for (const auto& f : frames) {
+        b.insert(b.end(), {0x21, 0xF9, 4, 0x05});  // disposal none, transparent index 0
+        u16(f.delay_cs);
+        b.insert(b.end(), {0, 0});
+        b.push_back(0x2C);
+        u16(f.x);
+        u16(f.y);
+        u16(f.w);
+        u16(f.h);
+        b.push_back(0);
+        b.push_back(2);  // LZW minimum code size
+        // 3-bit codes, a clear code before every two pixels so the code width never grows.
+        std::vector<std::uint8_t> data;
+        std::uint32_t acc = 0;
+        int bits = 0;
+        auto code = [&](std::uint32_t c) {
+            acc |= c << bits;
+            bits += 3;
+            while (bits >= 8) {
+                data.push_back(static_cast<std::uint8_t>(acc & 0xFF));
+                acc >>= 8;
+                bits -= 8;
+            }
+        };
+        const int n = f.w * f.h;
+        for (int i = 0; i < n; ++i) {
+            if (i % 2 == 0) code(4);
+            code(f.px.empty() ? f.index : f.px[static_cast<std::size_t>(i)]);
+        }
+        code(5);
+        if (bits > 0) data.push_back(static_cast<std::uint8_t>(acc & 0xFF));
+        for (std::size_t i = 0; i < data.size(); i += 255) {
+            const std::size_t len = std::min<std::size_t>(255, data.size() - i);
+            b.push_back(static_cast<std::uint8_t>(len));
+            b.insert(b.end(), data.begin() + static_cast<std::ptrdiff_t>(i), data.begin() + static_cast<std::ptrdiff_t>(i + len));
+        }
+        b.push_back(0);
+    }
+    b.push_back(0x3B);
+    std::ofstream(path, std::ios::binary).write(reinterpret_cast<const char*>(b.data()), static_cast<std::streamsize>(b.size()));
+}
+// A transparent canvas, then `n` one-pixel frames: a small file of n full-size frames.
+std::vector<GifRect> pixel_frames(int width, int height, int n) {
+    std::vector<GifRect> f{{0, 0, width, height, 0, 10, {}}};
+    for (int i = 1; i < n; ++i) f.push_back({i % width, 0, 1, 1, static_cast<std::uint8_t>(1 + i % 3), 10, {}});
+    return f;
+}
+}  // namespace
+
+TEST_CASE("an animated GIF is converted once into a sprite and a clip with alpha, bounded by the RAM budget") {
+    const auto dir = std::filesystem::temp_directory_path() / "mtp-anim-unit";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    // 4 frames of 0.1 s: a red square on a transparent background.
+    const auto small = (dir / "square.gif").string();
+    std::vector<std::uint8_t> canvas(64 * 36, 0);
+    for (int y = 8; y < 24; ++y)
+        for (int x = 8; x < 24; ++x) canvas[static_cast<std::size_t>(y * 64 + x)] = 1;
+    write_gif(small, 64, 36, {{0, 0, 64, 36, 0, 10, canvas}, {8, 8, 16, 16, 1, 10, {}}, {8, 8, 16, 16, 1, 10, {}}, {8, 8, 16, 16, 1, 10, {}}});
+    // A small file with many frames: 20 frames of 640x360, upscaled to 1280x720 clip frames.
+    const auto big = (dir / "big.gif").string();
+    write_gif(big, 640, 360, pixel_frames(640, 360, 20));
+    // More frames than the limit.
+    const auto many = (dir / "many.gif").string();
+    write_gif(many, 16, 16, pixel_frames(16, 16, 1001));
+    // More pixels to decode than the budget allows: 100 frames of 1280x720 (92 Mpx, 64 MB budget = 16 Mpx).
+    const auto huge = (dir / "huge.gif").string();
+    write_gif(huge, 1280, 720, pixel_frames(1280, 720, 100));
+    REQUIRE(std::filesystem::file_size(huge) < 2'000'000);
+    VisualInfo info;
+    std::string err;
+    REQUIRE(probe_visual(big, info, err));
+    CHECK(info.frames == 20);
+    CHECK(info.w == 640);
+    CHECK(info.total_s == doctest::Approx(2.0));
+
+    Config cfg;
+    cfg.library_dir = (dir / "library").string();
+    cfg.ram_budget_mb = 64;  // 20 clip frames at 720p need 20 x 2 x 2.5 MB (fill_key: fill and key)
+    const VideoFormat fmt = *parse_format("720p25");
+    Library library(cfg);
+    library.start();
+    const auto a = library.ingest_file(small, "square", nlohmann::json::object(), fmt);
+    const auto b = library.ingest_file(big, "big", nlohmann::json::object(), fmt);
+    const auto c = library.ingest_file(many, "many", nlohmann::json::object(), fmt);
+    const auto d = library.ingest_file(huge, "huge", nlohmann::json::object(), fmt);
+    for (const auto* it : {&a, &b, &c, &d}) library.wait_ready(it->id, fmt.name, 60000);
+    library.stop();
+
+    const auto ca = library.get(a.id).conversions.at(fmt.name);
+    CHECK(library.get(a.id).type == ItemType::Sprite);
+    CHECK(ca.at("status") == "ready");
+    CHECK(ca.at("frames") == 4);
+    CHECK(ca.at("clip") == true);
+    CHECK(ca.at("clip_frames") == 10);
+    const auto adir = std::filesystem::path(library.item_dir(a.id));
+    const std::size_t fill = v210_size(fmt.width, fmt.height), alpha = alpha10_size(fmt.width, fmt.height);
+    CHECK(std::filesystem::file_size(adir / "anim-720p25.v210") == 4 * fill);
+    CHECK(std::filesystem::file_size(adir / "anim-720p25.a10") == 4 * alpha);
+    CHECK(std::filesystem::exists(adir / "sprite.json"));
+    // Fit: 64x36 scaled 20x to 1280x720, the square at (160..480, 160..480). Alpha 1023 there, 0 around.
+    std::ifstream ain(adir / "anim-720p25.a10", std::ios::binary);
+    std::vector<std::uint8_t> plane(alpha);
+    ain.read(reinterpret_cast<char*>(plane.data()), static_cast<std::streamsize>(alpha));
+    CHECK(a10_at(plane, fmt.width, 320, 320) == 1023);
+    CHECK(a10_at(plane, fmt.width, 800, 500) == 0);
+    // The fill is black where the alpha is 0 (the GIF's transparent colour is white).
+    std::ifstream fin(adir / "anim-720p25.v210", std::ios::binary);
+    std::vector<std::uint8_t> first(fill);
+    fin.read(reinterpret_cast<char*>(first.data()), static_cast<std::streamsize>(fill));
+    CHECK(luma_at(first, fmt.width, 800, 500) == kYBlack);
+    CHECK(luma_at(first, fmt.width, 320, 320) == rgb_to_yuv709(1, 0, 0).y);
+
+    // Too big as a clip for the budget: refused with a reason, still a sprite.
+    const auto cb = library.get(b.id).conversions.at(fmt.name);
+    CHECK(cb.at("status") == "ready");
+    CHECK(cb.at("clip") == false);
+    CHECK(cb.at("clip_error").get<std::string>().find("PLAYER_RAM_BUDGET_MB") != std::string::npos);
+    CHECK_FALSE(std::filesystem::exists(std::filesystem::path(library.item_dir(b.id)) / "anim-720p25.v210"));
+
+    // Too many frames: refused.
+    const auto cc = library.get(c.id).conversions.at(fmt.name);
+    CHECK(cc.at("status") == "failed");
+    CHECK(cc.at("error").get<std::string>().find("more than 1000") != std::string::npos);
+    // Too many pixels to decode for the budget: refused before decoding.
+    const auto cd = library.get(d.id).conversions.at(fmt.name);
+    CHECK(cd.at("status") == "failed");
+    INFO(cd.dump());
+    CHECK(cd.at("error").get<std::string>().find("Mpx to decode") != std::string::npos);
+    // A failed conversion is not queued again by playing it (only by an explicit re-convert).
+    const auto jobs = library.jobs().size();
+    for (int i = 0; i < 50; ++i) library.ensure_format(c.id, fmt);
+    CHECK(library.jobs().size() == jobs);
+    CHECK(library.get(c.id).conversions.at(fmt.name).at("status") == "failed");
     std::filesystem::remove_all(dir);
 }
 

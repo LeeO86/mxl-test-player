@@ -170,12 +170,12 @@ const playTarget = computed(() => selectedOutput.value);
           </td>
           <td class="small">{{ original(item) }}</td>
           <td>
-            <span v-for="(c, f) in item.conversions" :key="f" class="pill" :class="STATUS_KIND[c.status] || 'neutral'" :title="c.error || ''">{{ f }} {{ c.status }}</span>
+            <span v-for="(c, f) in item.conversions" :key="f" class="pill" :class="STATUS_KIND[c.status] || 'neutral'" :title="c.error || c.clip_error || ''">{{ f }} {{ c.status }}<template v-if="c.clip === false"> (sprite only)</template></span>
           </td>
           <td class="small muted">{{ item.fit }} · {{ item.fps_mode }}<span v-if="item.type === 'still'"> · {{ item.alpha_mode }}</span><span v-if="item.loudness"> · −23 LUFS</span></td>
           <td class="small">{{ usedBy(item).map((o) => o.label).join(", ") || "–" }}</td>
           <td class="actions-cell">
-            <button v-if="item.type !== 'sprite' && playTarget" class="btn small" @click="playItem(playTarget.index, item)">Play on {{ outputLabel(playTarget.index) }}</button>
+            <button v-if="playTarget" class="btn small" @click="playItem(playTarget.index, item)">Play on {{ outputLabel(playTarget.index) }}</button>
             <button class="btn small secondary" @click="openEdit(item, 'edit')">Edit</button>
             <button class="btn small secondary" @click="openEdit(item, 'reconvert')">Re-convert</button>
             <button class="btn small danger" @click="remove(item)">Delete</button>

@@ -7,6 +7,8 @@
 
 #include <atomic>
 #include <functional>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -76,6 +78,23 @@ public:
 
     std::function<void()> on_change;
 
+    // PLAYER_RAM_BUDGET_MB is one budget for the whole process: every output's clips in RAM.
+    // A reservation holds `bytes` of it until the last copy of the returned pointer is gone; null
+    // when they do not fit.
+    std::shared_ptr<void> reserve_ram(std::uint64_t bytes);
+    std::uint64_t ram_used() const;
+    std::uint64_t ram_budget() const;
+
+    // Decoded clip data, loaded once and shared by every output that plays it (the fill and the
+    // alpha of an animation are the same on every output). `key` names the content; `load` fills
+    // `bytes` of it. Counted once against the budget while any output holds it.
+    struct SharedBlob {
+        std::vector<std::uint8_t> data;
+        std::shared_ptr<void> reservation;
+    };
+    std::shared_ptr<const SharedBlob> shared_blob(const std::string& key, std::uint64_t bytes,
+                                                  const std::function<bool(std::vector<std::uint8_t>&)>& load, std::string& error);
+
 private:
     void worker();
     void watch_import();
@@ -93,6 +112,14 @@ private:
     std::thread watcher_;
     std::atomic<bool> stop_{false};
     std::uint64_t bytes_ = 0;
+    std::uint64_t job_serial_ = 0;
+    struct RamBudget {
+        std::atomic<std::uint64_t> used{0};
+        std::uint64_t limit = 0;
+    };
+    std::shared_ptr<RamBudget> ram_ = std::make_shared<RamBudget>();  // outlives the reservations
+    std::mutex blob_mu_;  // held while a blob loads: two outputs asking for the same clip load it once
+    std::map<std::string, std::weak_ptr<const SharedBlob>> blobs_;
 };
 
 const char* item_type_name(ItemType t);

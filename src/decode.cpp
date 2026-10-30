@@ -187,124 +187,176 @@ bool v210_to_jpeg(const std::string& path, const std::uint8_t* v210, int w, int 
     return write_jpeg(path, rgb.data(), out_w, out_h, 80);
 }
 
-bool decode_visual(const std::string& path, ScaleMode mode, int box_w, int box_h, SpriteSequence& out, std::string& error) {
+namespace {
+
+struct Opened {
     AVFormatContext* fmt = nullptr;
-    if (avformat_open_input(&fmt, path.c_str(), nullptr, nullptr) < 0) {
-        error = "open failed";
+    int vindex = -1;
+    ~Opened() {
+        if (fmt) avformat_close_input(&fmt);
+    }
+    bool open(const std::string& path, std::string& error) {
+        if (avformat_open_input(&fmt, path.c_str(), nullptr, nullptr) < 0) {
+            error = "open failed";
+            return false;
+        }
+        if (avformat_find_stream_info(fmt, nullptr) < 0) {
+            error = "no stream info";
+            return false;
+        }
+        vindex = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+        if (vindex < 0) {
+            error = "no video stream";
+            return false;
+        }
+        const auto* par = fmt->streams[vindex]->codecpar;
+        if (static_cast<std::int64_t>(par->width) * par->height > kMaxImagePixels) {
+            error = "image is " + std::to_string(par->width) + "x" + std::to_string(par->height) + ", more pixels than 8192x4608";
+            return false;
+        }
+        return true;
+    }
+};
+
+// A frame's duration; 0.1 s when it has none. A GIF delay of 10 ms or less is 100 ms, as browsers
+// play it (such GIFs are made for that).
+double frame_seconds(std::int64_t duration, AVRational tb, bool gif) {
+    const double d = duration > 0 ? duration * av_q2d(tb) : 0.0;
+    if (d <= 0 || (gif && d <= 0.0105)) return 0.1;
+    return d;
+}
+
+}  // namespace
+
+std::string probe_video_codec(const std::string& path) {
+    Opened in;
+    std::string error;
+    if (!in.open(path, error)) return {};
+    return avcodec_get_name(in.fmt->streams[in.vindex]->codecpar->codec_id);
+}
+
+bool probe_visual(const std::string& path, VisualInfo& info, std::string& error) {
+    Opened in;
+    if (!in.open(path, error)) return false;
+    AVStream* st = in.fmt->streams[in.vindex];
+    info = {};
+    info.w = st->codecpar->width;
+    info.h = st->codecpar->height;
+    AVPacket* pkt = av_packet_alloc();
+    while (av_read_frame(in.fmt, pkt) >= 0) {
+        if (pkt->stream_index == in.vindex) {
+            ++info.frames;
+            info.total_s += frame_seconds(pkt->duration, st->time_base, st->codecpar->codec_id == AV_CODEC_ID_GIF);
+        }
+        av_packet_unref(pkt);
+    }
+    av_packet_free(&pkt);
+    if (info.frames <= 0) {
+        error = "no frames";
         return false;
     }
-    if (avformat_find_stream_info(fmt, nullptr) < 0) {
-        avformat_close_input(&fmt);
-        error = "no stream info";
-        return false;
-    }
-    const int vindex = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
-    if (vindex < 0) {
-        avformat_close_input(&fmt);
-        error = "no video stream";
-        return false;
-    }
-    AVStream* st = fmt->streams[vindex];
+    return true;
+}
+
+bool decode_visual_frames(const std::string& path, const std::function<bool(const RgbaBuffer&, double)>& on_frame, std::string& error) {
+    Opened in;
+    if (!in.open(path, error)) return false;
+    AVStream* st = in.fmt->streams[in.vindex];
     const AVCodec* codec = avcodec_find_decoder(st->codecpar->codec_id);
-    AVCodecContext* dec = avcodec_alloc_context3(codec);
-    avcodec_parameters_to_context(dec, st->codecpar);
-    if (!codec || avcodec_open2(dec, codec, nullptr) < 0) {
+    AVCodecContext* dec = codec ? avcodec_alloc_context3(codec) : nullptr;
+    if (!dec || avcodec_parameters_to_context(dec, st->codecpar) < 0 || avcodec_open2(dec, codec, nullptr) < 0) {
         avcodec_free_context(&dec);
-        avformat_close_input(&fmt);
         error = "decoder open failed";
         return false;
     }
     AVPacket* pkt = av_packet_alloc();
     AVFrame* frame = av_frame_alloc();
     SwsContext* sws = nullptr;
-    int src_w = 0, src_h = 0;
-    int dw = 0, dh = 0, ox = 0, oy = 0;
-    int canvas_w = box_w, canvas_h = box_h;
+    RgbaBuffer buf;
+    int count = 0;
     bool ok = true;
-    while (av_read_frame(fmt, pkt) >= 0) {
-        if (pkt->stream_index != vindex) {
-            av_packet_unref(pkt);
-            continue;
-        }
-        if (avcodec_send_packet(dec, pkt) < 0) {
-            av_packet_unref(pkt);
-            continue;
-        }
-        av_packet_unref(pkt);
-        while (avcodec_receive_frame(dec, frame) == 0) {
-            if (!sws) {
-                src_w = frame->width;
-                src_h = frame->height;
-                fit_rect(mode, src_w, src_h, box_w, box_h, dw, dh, ox, oy);
-                if (mode == ScaleMode::SpriteMax) {
-                    canvas_w = dw;
-                    canvas_h = dh;
-                    ox = oy = 0;
-                }
-                sws = sws_getContext(src_w, src_h, static_cast<AVPixelFormat>(frame->format), dw, dh, AV_PIX_FMT_RGBA, SWS_BILINEAR,
-                                     nullptr, nullptr, nullptr);
+    bool more = true;
+    auto take = [&]() {
+        while (ok && more && avcodec_receive_frame(dec, frame) == 0) {
+            if (++count > kMaxAnimationFrames) {
+                error = "animation has more than " + std::to_string(kMaxAnimationFrames) + " frames";
+                ok = false;
+            } else {
+                sws = sws_getCachedContext(sws, frame->width, frame->height, static_cast<AVPixelFormat>(frame->format), frame->width,
+                                           frame->height, AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr, nullptr);
                 if (!sws) {
                     error = "scale failed";
                     ok = false;
-                    break;
+                } else {
+                    buf.w = frame->width;
+                    buf.h = frame->height;
+                    buf.px.resize(static_cast<std::size_t>(buf.w) * buf.h * 4);
+                    uint8_t* dst[4] = {buf.px.data(), nullptr, nullptr, nullptr};
+                    int lines[4] = {buf.w * 4, 0, 0, 0};
+                    sws_scale(sws, frame->data, frame->linesize, 0, frame->height, dst, lines);
+                    more = on_frame(buf, frame_seconds(frame->duration, st->time_base, st->codecpar->codec_id == AV_CODEC_ID_GIF));
                 }
-            }
-            std::vector<std::uint8_t> scaled(static_cast<std::size_t>(dw) * dh * 4);
-            uint8_t* dst_data[4] = {scaled.data(), nullptr, nullptr, nullptr};
-            int dst_lines[4] = {dw * 4, 0, 0, 0};
-            sws_scale(sws, frame->data, frame->linesize, 0, frame->height, dst_data, dst_lines);
-            RgbaBuffer buf;
-            buf.w = canvas_w;
-            buf.h = canvas_h;
-            buf.px.assign(static_cast<std::size_t>(canvas_w) * canvas_h * 4, 0);
-            blit_rgba(buf.px.data(), canvas_w, canvas_h, scaled.data(), dw, dh, ox, oy);
-            double dur = 0.1;
-            if (frame->duration > 0) dur = frame->duration * av_q2d(st->time_base);
-            if (dur <= 0) dur = 0.1;
-            out.frames.push_back(std::move(buf));
-            out.durations.push_back(dur);
-            if (mode != ScaleMode::SpriteMax && out.frames.size() == 1 && st->nb_frames <= 1 &&
-                st->codecpar->codec_id != AV_CODEC_ID_GIF && st->codecpar->codec_id != AV_CODEC_ID_APNG &&
-                st->codecpar->codec_id != AV_CODEC_ID_WEBP) {
-                // A still only needs the first frame. Animated webp/gif/apng continue.
             }
             av_frame_unref(frame);
         }
-        if (!ok) break;
+    };
+    while (ok && more && av_read_frame(in.fmt, pkt) >= 0) {
+        if (pkt->stream_index == in.vindex && avcodec_send_packet(dec, pkt) >= 0) take();
+        av_packet_unref(pkt);
     }
-    avcodec_send_packet(dec, nullptr);
-    while (ok && avcodec_receive_frame(dec, frame) == 0) {
-        if (sws) {
-            std::vector<std::uint8_t> scaled(static_cast<std::size_t>(dw) * dh * 4);
-            uint8_t* dst_data[4] = {scaled.data(), nullptr, nullptr, nullptr};
-            int dst_lines[4] = {dw * 4, 0, 0, 0};
-            sws_scale(sws, frame->data, frame->linesize, 0, frame->height, dst_data, dst_lines);
-            RgbaBuffer buf;
-            buf.w = canvas_w;
-            buf.h = canvas_h;
-            buf.px.assign(static_cast<std::size_t>(canvas_w) * canvas_h * 4, 0);
-            blit_rgba(buf.px.data(), canvas_w, canvas_h, scaled.data(), dw, dh, ox, oy);
-            double dur = frame->duration > 0 ? frame->duration * av_q2d(st->time_base) : 0.1;
-            if (dur <= 0) dur = 0.1;
-            out.frames.push_back(std::move(buf));
-            out.durations.push_back(dur);
-        }
-        av_frame_unref(frame);
+    if (ok && more) {
+        avcodec_send_packet(dec, nullptr);
+        take();
     }
     if (sws) sws_freeContext(sws);
     av_frame_free(&frame);
     av_packet_free(&pkt);
     avcodec_free_context(&dec);
-    avformat_close_input(&fmt);
-    if (!ok || out.frames.empty()) {
-        if (error.empty()) error = "no frames decoded";
-        return false;
+    if (ok && count == 0) {
+        error = "no frames decoded";
+        ok = false;
     }
-    out.w = out.frames[0].w;
-    out.h = out.frames[0].h;
-    // Single-frame stills requested as a canvas (not sprite) should not keep extra frames
-    // from a format that happens to report one. Animations keep every frame.
-    return true;
+    return ok;
+}
+
+RgbaFitter::~RgbaFitter() {
+    if (sws_) sws_freeContext(static_cast<SwsContext*>(sws_));
+}
+
+void RgbaFitter::fit(const RgbaBuffer& src, ScaleMode mode, int box_w, int box_h, RgbaBuffer& out) {
+    int dw = 0, dh = 0, ox = 0, oy = 0;
+    fit_rect(mode, src.w, src.h, box_w, box_h, dw, dh, ox, oy);
+    if (mode == ScaleMode::SpriteMax) {
+        box_w = dw;
+        box_h = dh;
+        ox = oy = 0;
+    }
+    auto* sws = sws_getCachedContext(static_cast<SwsContext*>(sws_), src.w, src.h, AV_PIX_FMT_RGBA, dw, dh, AV_PIX_FMT_RGBA, SWS_BILINEAR,
+                                     nullptr, nullptr, nullptr);
+    sws_ = sws;
+    out.w = box_w;
+    out.h = box_h;
+    out.px.assign(static_cast<std::size_t>(box_w) * box_h * 4, 0);
+    if (!sws) return;
+    // Scaled premultiplied, then straight again: the colour of transparent pixels (often white in
+    // a GIF) does not bleed into the edges, and the fill is black where the alpha is 0.
+    premul_.resize(src.px.size());
+    for (std::size_t i = 0; i + 3 < src.px.size(); i += 4) {
+        const unsigned a = src.px[i + 3];
+        for (int c = 0; c < 3; ++c) premul_[i + c] = static_cast<std::uint8_t>((src.px[i + c] * a + 127) / 255);
+        premul_[i + 3] = static_cast<std::uint8_t>(a);
+    }
+    scaled_.resize(static_cast<std::size_t>(dw) * dh * 4);
+    const uint8_t* sdata[4] = {premul_.data(), nullptr, nullptr, nullptr};
+    int slines[4] = {src.w * 4, 0, 0, 0};
+    uint8_t* ddata[4] = {scaled_.data(), nullptr, nullptr, nullptr};
+    int dlines[4] = {dw * 4, 0, 0, 0};
+    sws_scale(sws, sdata, slines, 0, src.h, ddata, dlines);
+    for (std::size_t i = 0; i + 3 < scaled_.size(); i += 4) {
+        const unsigned a = scaled_[i + 3];
+        for (int c = 0; c < 3; ++c) scaled_[i + c] = a ? static_cast<std::uint8_t>(std::min(255u, (scaled_[i + c] * 255u + a / 2) / a)) : 0;
+    }
+    blit_rgba(out.px.data(), box_w, box_h, scaled_.data(), dw, dh, ox, oy);
 }
 
 struct MezzanineReader::Impl {

@@ -122,4 +122,27 @@ int sprite_frame_at_time(double time_s, const double* durations, int count, doub
     return count - 1;
 }
 
+std::int64_t animation_loop_frames(double total_s, Rational frame_rate) {
+    const double fps = frame_rate.to_double();
+    if (!(total_s > 0) || !(fps > 0)) return 1;
+    return std::max<std::int64_t>(1, std::llround(total_s * fps));
+}
+
+int animation_frame_at(std::int64_t k, std::int64_t loop_frames, const double* durations, int count) {
+    if (count <= 1 || loop_frames <= 0) return 0;
+    double total = 0;
+    for (int i = 0; i < count; ++i) total += std::max(0.0, durations[i]);
+    if (total <= 0) return 0;
+    k = ((k % loop_frames) + loop_frames) % loop_frames;
+    // The start of output frame k in the animation's time; the epsilon keeps a frame that starts
+    // exactly on an animation frame's start from falling into the frame before it.
+    const double t = static_cast<double>(k) * total / static_cast<double>(loop_frames) + 1e-9;
+    double acc = 0;
+    for (int i = 0; i < count; ++i) {
+        acc += std::max(0.0, durations[i]);
+        if (t < acc) return i;
+    }
+    return count - 1;
+}
+
 }  // namespace mtp

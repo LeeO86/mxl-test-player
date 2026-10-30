@@ -37,12 +37,12 @@ Precedence is environment, then the JSON file (`--config`, else `PLAYER_CONFIG`,
 | `PLAYER_IMPORT_DIR` | empty | Watched import directory |
 | `PLAYER_CONVERT_CONCURRENCY` | `1` | ffmpeg jobs at once |
 | `PLAYER_RAM_CLIP_MAX_S` | `20` | Longest clip kept in RAM |
-| `PLAYER_RAM_BUDGET_MB` | `4096` | RAM budget for clips |
+| `PLAYER_RAM_BUDGET_MB` | `4096` | One RAM budget for the whole process: every output's clips in RAM (videos up to `PLAYER_RAM_CLIP_MAX_S`, GIF and APNG clips; shared between outputs that play the same clip). Also bounds an animation's conversion |
 | `PLAYER_PREROLL_FRAMES` | `25` | Frames prepared before play |
 | `PLAYER_FONT_DIR` | bundled | Font directory |
 | `PLAYER_WEB_ROOT` | bundled | Built web UI |
 | `PLAYER_UPLOAD_LIMIT_GB` | `20` | Upload limit |
-| `PLAYER_SPRITE_MAX_PX` | `512` | Moving-box sprite size |
+| `PLAYER_SPRITE_MAX_PX` | `512` | Moving-box sprite size (an animation's sprite frames) |
 | `MXL_DOMAIN_SCAN_PATH` | `/Volumes/mxl` | Parent of domain directories. No inputs are scanned |
 | `MXL_OUTPUT_DOMAIN_DIR` | `<scan>/player-<seed>` | This function's domain. Created if missing |
 | `MXL_OUTPUT_DOMAIN_ID` | UUIDv5(seed, `domain`) | Used when the domain is created; a different existing id is logged and kept |
@@ -94,6 +94,8 @@ Precedence is environment, then the JSON file (`--config`, else `PLAYER_CONFIG`,
 | GET | `/widgets`, `/widget/transport?output=<n>[&theme=dark\|light\|transparent]` (below) |
 | GET, PATCH | `/x-nmos/node/v1.3/…`, `/x-nmos/connection/v1.1/single/senders/{id}/staged` on `NMOS_PORT` |
 
+Fire a clip with `PUT /api/v1/outputs/{id}/source` (`{"type": "video", "item_id": "<id>"}`, or `still`, `pattern`, `playlist`) and `POST /api/v1/outputs/{id}/transport` (`{"action": "restart"}`). An animated GIF or APNG (`sprite` item) plays the same way, as a loop with its alpha (`v210a` or `fill_key`); in a playlist set through the API its entry needs `frames` = the item's `clip_frames` for the output's format. It is converted per format into raw frames: about 8 MB of library disk per GIF frame and format at 1080 lines (33 MB at 2160). The `transparent` pattern is black at alpha 0, for a keyed output of burn-ins only. An output that feeds a keyer with graphics should set `idle_key: transparent` (patterns, videos and stop carry the idle key; an item with alpha that is not ready is transparent).
+
 `GET /api/v1/config/export` is one JSON document (`version`, informational `deployment`, and `state`). There are no secrets to omit. `POST /api/v1/config/import` restores outputs, presets and playlists. It does not change ports, the registry or the seed. `GET /api/v1/config` remains the live view.
 
 `GET /api/v1/config` also lists every setting with its effective value and origin (`environment`, `file`, `argument` for `--config`, `default`). `GET /api/v1/info` has the version and the MXL revision.
@@ -110,6 +112,9 @@ Widgets: operator screens can frame one output's transport. `GET /widgets` lists
 ./build/player_tests
 python3 tests/integration/lifecycle.py
 python3 tests/integration/play_loop.py
+python3 tests/integration/keying.py [--shots DIR]
 ```
+
+`keying.py` reads the MXL grains back with `build/player_grain_dump <domain> <flow id> <index|-N> <file>` (a lab tool built with the tests) and checks the alpha and key values.
 
 See `IMPLEMENTATION_PLAN.md` for the G1–G14 audit and `deploy/` for Compose, Kubernetes and Grafana.

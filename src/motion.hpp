@@ -42,4 +42,13 @@ void retarget_motion(MotionParams& next, const MotionParams& prev, std::uint64_t
 // Sprite frame chosen by elapsed TAI time, independent of the output rate.
 int sprite_frame_at_time(double time_s, const double* durations, int count, double& total_out);
 
+// An animation played as a clip: one loop lasts its duration at the output frame rate, rounded
+// to whole output frames (at least 1), so loops are seamless and seek, pause and playlists work
+// as for a video. The speed is off by at most half an output frame per loop.
+std::int64_t animation_loop_frames(double total_s, Rational frame_rate);
+
+// The animation frame shown at output frame `k` (0 .. loop_frames - 1) of a loop: the
+// animation's own frame timing, stretched to the loop.
+int animation_frame_at(std::int64_t k, std::int64_t loop_frames, const double* durations, int count);
+
 }  // namespace mtp

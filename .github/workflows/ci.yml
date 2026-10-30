@@ -28,3 +28,4 @@ jobs:
           python3 tests/integration/lifecycle.py
           python3 tests/integration/play_loop.py
           python3 tests/integration/stale_sender.py
+          python3 tests/integration/keying.py

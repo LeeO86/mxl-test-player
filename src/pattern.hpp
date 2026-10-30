@@ -34,7 +34,8 @@ enum class VideoPattern {
     Grey50,
     Motion,
     FieldOrder,
-    AvSync
+    AvSync,
+    Transparent  // black at alpha 0 (v210a) or key_min (fill_key): a keyed output of burn-ins only
 };
 
 VideoPattern parse_video_pattern(std::string_view s);
@@ -61,6 +62,9 @@ struct StillFrame {
     const std::uint8_t* data = nullptr;
     std::shared_ptr<const void> token;
 };
+
+// True for the patterns that change from frame to frame (rendered per grain).
+bool pattern_moves(VideoPattern p);
 
 // The cached frame of a pattern that does not move (rendered on first use, per thread), or an
 // empty StillFrame for a moving one.
