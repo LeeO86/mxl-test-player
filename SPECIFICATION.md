@@ -127,7 +127,9 @@ overlays beyond §5.4, scheduling by time of day.
   where the audio carries a beep (§5.2), once per second by default; offset
   measurable in frames and ms.
 - Patterns are generated at the output format natively (no scaling) and cached
-  per format.
+  per format. A pattern that does not move is rendered by the output's loader thread
+  when it is selected (1.3.0), never by the real-time writer; moving patterns are
+  rendered per grain.
 
 ### 5.2 Audio signals
 

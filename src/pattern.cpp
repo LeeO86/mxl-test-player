@@ -403,8 +403,12 @@ bool flash_of(const PatternRequest& req) {
 
 }  // namespace
 
+bool pattern_moves(VideoPattern p) {
+    return p == VideoPattern::ZonePlateMoving || p == VideoPattern::Motion || p == VideoPattern::FieldOrder;
+}
+
 StillFrame still_pattern(const PatternRequest& req) {
-    if (req.pattern == VideoPattern::ZonePlateMoving || req.pattern == VideoPattern::Motion || req.pattern == VideoPattern::FieldOrder) return {};
+    if (pattern_moves(req.pattern)) return {};
     const int w = req.format.width;
     const int h = req.format.height;
     const bool flash = flash_of(req);

@@ -63,6 +63,9 @@ struct StillFrame {
     std::shared_ptr<const void> token;
 };
 
+// True for the patterns that change from frame to frame (rendered per grain).
+bool pattern_moves(VideoPattern p);
+
 // The cached frame of a pattern that does not move (rendered on first use, per thread), or an
 // empty StillFrame for a moving one.
 StillFrame still_pattern(const PatternRequest& req);

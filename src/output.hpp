@@ -85,6 +85,11 @@ private:
         std::shared_ptr<const Library::SharedBlob> anim_alpha;  // per frame: the v210a alpha plane, or the fill_key key; null without a key
         std::vector<double> anim_durations;
         std::string error;  // why the item cannot play (status `media_error`)
+        // A pattern that does not move, rendered by the loader (never by the real-time writer):
+        // [0] the frame, [1] its A/V-sync flash frame (av_sync and the sync beep only).
+        std::string pattern;
+        bool pattern_pluge = false;
+        std::vector<std::uint8_t> pattern_v210[2];
         std::int64_t frames = 1;
         int channels = 0;
         std::string name;

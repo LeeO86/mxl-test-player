@@ -239,6 +239,24 @@ AudioProgram Output::program_for(const SourceDesc& src, int channels) const {
 
 Output::Media Output::load_media(const SourceDesc& src, const VideoFormat& fmt) const {
     Media media;
+    if (src.type == "pattern") {
+        PatternRequest req;
+        req.format = fmt;
+        req.pattern = parse_video_pattern(src.pattern);
+        req.pluge = src.pluge;
+        if (pattern_moves(req.pattern)) return media;
+        media.pattern = src.pattern;
+        media.pattern_pluge = src.pluge;
+        media.format = fmt.name;
+        const bool sync = src.sync_beep || src.pattern == "av_sync";
+        req.frame_index = 1;  // not a sync frame: av_sync flashes on frame 0 of each second
+        for (int flash = 0; flash < (sync ? 2 : 1); ++flash) {
+            req.flash = flash == 1;
+            media.pattern_v210[flash].assign(v210_size(fmt.width, fmt.height), 0);
+            render_pattern(req, media.pattern_v210[flash].data());
+        }
+        return media;
+    }
     if (src.type != "video" && src.type != "still") return media;
     if (src.item_id.empty() || !library_.exists(src.item_id)) return media;
     LibraryItem item;
@@ -715,8 +733,16 @@ void Output::writer_main() {
                 // advance between the first and the second field.
                 req.field = field;
                 req.flash = (src.sync_beep || src.pattern == "av_sync") && is_sync_frame(req.frame_index, fmt.frame_rate);
-                fill_src = still_pattern(req);
-                if (!fill_src.data) render_pattern(req, fill);
+                // A moving pattern is rendered per grain. Any other is the loader's frame; until the
+                // loader has it (a few ms after a switch) the last pattern stays, or black.
+                if (pattern_moves(req.pattern)) {
+                    render_pattern(req, fill);
+                } else {
+                    const bool same = media->pattern == src.pattern && media->pattern_pluge == src.pluge && media->format == fmt.name;
+                    const auto& pf = media->pattern_v210[same && req.flash && !media->pattern_v210[1].empty() ? 1 : 0];
+                    if (pf.size() == full_bytes) fill_src = StillFrame{pf.data(), std::shared_ptr<const void>(media, pf.data())};
+                    else fill_src = black_frame(fmt.width, fmt.height);
+                }
                 // Black at alpha 0, whatever the idle key: only the burn-ins are keyed.
                 if (req.pattern == VideoPattern::Transparent) transparent_key();
             } else {
