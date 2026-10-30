@@ -33,7 +33,7 @@ Precedence is environment, then the JSON file (`--config`, else `PLAYER_CONFIG`,
 | `PLAYER_FORMAT` | `1080p50` | Platform format (`1080i25` and `1080i29.97` are top field first; `1080i25bff` and `1080i29.97bff` bottom field first) |
 | `PLAYER_OUTPUTS` | `2` | Output count, 1..16 |
 | `PLAYER_AUDIO_CHANNELS` | `16` | Default audio channels |
-| `PLAYER_LIBRARY_DIR` | `/data/library` | Mezzanine library |
+| `PLAYER_LIBRARY_DIR` | `/data/library` | Mezzanine library; one player per directory (Kubernetes: `strategy: Recreate`). Items missing from its `index.json` are restored from their `item.json` at start |
 | `PLAYER_IMPORT_DIR` | empty | Watched import directory |
 | `PLAYER_CONVERT_CONCURRENCY` | `1` | ffmpeg jobs at once |
 | `PLAYER_RAM_CLIP_MAX_S` | `20` | Longest clip kept in RAM |

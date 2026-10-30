@@ -283,7 +283,17 @@ is kept (configurable retention) so changing the platform format later is possib
   stingers, idents and short clips.
 - Storage layout under `PLAYER_LIBRARY_DIR` (default `/data/library`): one
   directory per item with `original.*`, `mezz-<format>.mov` or `frame-<format>.v210`,
-  `thumb.jpg`, `item.json`.
+  `thumb.jpg`, `item.json`, and `index.json` (all items, in library order).
+- `index.json` and each `item.json` are written to a temporary file and renamed over
+  the old one (1.3.1): a reader or a restart sees the old or the new file, never a
+  part, and a failed write is logged (`ERROR library: …`) and leaves the old file.
+  At start an index entry that cannot be read is logged and skipped, not the entries
+  after it, and every item folder whose `item.json` is not in `index.json` is restored
+  from it (`WARN library: restored …`); `index.json` is then written again. The start
+  logs the item count (`INFO library: N items (M restored from item.json)`). A delete
+  removes `item.json` first, so a folder that is not removed completely does not come
+  back. One player per library directory: two processes on one directory each write
+  their own list (the Kubernetes example uses `strategy: Recreate`).
 
 ---
 
