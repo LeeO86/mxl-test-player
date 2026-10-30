@@ -103,6 +103,7 @@ def main():
             "PLAYER_FORMAT": "720p25",
             "PLAYER_OUTPUTS": "1",
             "PLAYER_AUDIO_CHANNELS": "2",
+            "PLAYER_RAM_BUDGET_MB": "64",  # one budget for the process; a 20-frame clip below does not fit
             "PLAYER_LIBRARY_DIR": str(work / "lib"),
             "PLAYER_STATE": str(work / "state.json"),
             "PLAYER_FONT_DIR": str(ROOT / "assets" / "fonts"),
@@ -190,7 +191,7 @@ def main():
             ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
              "color=c=white:s=64x36:r=5:d=0.4,format=rgba,geq=r=255:g=255:b=255:a=128", "-plays", "0", "-f", "apng", str(apng)])
 
-        def upload(path):
+        def upload(path, clip=True):
             meta = http("POST", "/api/v1/uploads", {"name": path.name, "size": path.stat().st_size, "options": {"fit": "fit"}})
             http("PUT", f"/api/v1/uploads/{meta['id']}/chunks/0", raw=path.read_bytes())
             item = http("POST", f"/api/v1/uploads/{meta['id']}/complete", {})
@@ -198,7 +199,7 @@ def main():
             while time.time() < deadline:
                 conv = http("GET", f"/api/v1/library/{item['id']}")["conversions"].get("720p25", {})
                 if conv.get("status") in ("ready", "failed"):
-                    assert conv["status"] == "ready" and conv.get("clip"), conv
+                    assert conv["status"] == "ready" and conv.get("clip") == clip, conv
                     return item, conv
                 time.sleep(0.2)
             raise SystemExit("conversion timeout")
@@ -264,9 +265,34 @@ def main():
             time.sleep(0.1)
         time.sleep(0.4)
         g = grain(http("GET", "/api/v1/outputs/0")["video_flow_id"], work)
-        assert abs(alpha(g, 640, 360) - round(128 / 255 * 1023)) <= 5, alpha(g, 640, 360)  # one 8-bit step of scaling
+        apng_a = alpha(g, 640, 360)
+        assert abs(apng_a - round(128 / 255 * 1023)) <= 5, apng_a  # one 8-bit step of scaling
         assert http("GET", "/api/v1/outputs/0")["underruns"] == 0
-        print("keying ok", "gif frames", gif_conv["frames"], "loop", gif_conv["clip_frames"], "ram", ram, "apng alpha", alpha(g, 640, 360))
+
+        # A GIF whose clip was refused (over the budget), with the idle key opaque: the output is
+        # transparent, not an opaque black frame, and says why. Stop shows the idle key.
+        big = work / "big.gif"
+        subprocess.check_call(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=blue:s=640x360:r=10",
+                               "-frames:v", "20", str(big)])
+        big_item, big_conv = upload(big, clip=False)
+        assert "PLAYER_RAM_BUDGET_MB" in big_conv["clip_error"], big_conv
+        http("PATCH", "/api/v1/outputs/0", {"idle_key": "opaque"})
+        http("PUT", "/api/v1/outputs/0/source", {"type": "video", "item_id": big_item["id"]})
+        http("POST", "/api/v1/outputs/0/transport", {"action": "play"})
+        deadline = time.time() + 10
+        while not http("GET", "/api/v1/outputs/0")["media_error"]:
+            assert time.time() < deadline, "no media_error"
+            time.sleep(0.1)
+        time.sleep(0.3)
+        st = http("GET", "/api/v1/outputs/0")
+        g = grain(st["video_flow_id"], work)
+        assert not st["media_ready"] and alpha(g, 640, 360) == 0, (st["media_error"], alpha(g, 640, 360))
+        http("POST", "/api/v1/outputs/0/transport", {"action": "stop"})
+        time.sleep(0.3)
+        g = grain(st["video_flow_id"], work)
+        assert alpha(g, 640, 360) == 1023, alpha(g, 640, 360)
+        print("keying ok", "refused clip:", st["media_error"])
+        print("keying ok", "gif frames", gif_conv["frames"], "loop", gif_conv["clip_frames"], "ram", ram, "apng alpha", apng_a)
     finally:
         proc.send_signal(signal.SIGTERM)
         try:

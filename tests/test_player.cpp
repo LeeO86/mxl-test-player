@@ -418,39 +418,115 @@ TEST_CASE("an animation plays at its own frame timing, mapped onto whole output 
     CHECK(animation_frame_at(7, 25, even.data(), 1) == 0);
 }
 
+namespace {
+// A GIF89a written by hand, so the tests need no ffmpeg program (the image build has none).
+// Palette: 0 transparent (white, as many GIFs have it), 1 red, 2 green, 3 blue. Each frame is a
+// rectangle of one colour on a canvas that is kept between frames (disposal "none"), with its
+// delay in 1/100 s; the first frame should cover the canvas.
+struct GifRect {
+    int x, y, w, h;
+    std::uint8_t index;
+    int delay_cs;
+    std::vector<std::uint8_t> px;  // the rectangle's indexes, when not one colour
+};
+void write_gif(const std::string& path, int width, int height, const std::vector<GifRect>& frames) {
+    std::vector<std::uint8_t> b{'G', 'I', 'F', '8', '9', 'a'};
+    auto u16 = [&](int v) {
+        b.push_back(static_cast<std::uint8_t>(v & 0xFF));
+        b.push_back(static_cast<std::uint8_t>(v >> 8));
+    };
+    u16(width);
+    u16(height);
+    b.insert(b.end(), {0xF1, 0, 0});  // global colour table of 4 entries
+    b.insert(b.end(), {255, 255, 255, 255, 0, 0, 0, 255, 0, 0, 0, 255});
+    b.insert(b.end(), {0x21, 0xFF, 11, 'N', 'E', 'T', 'S', 'C', 'A', 'P', 'E', '2', '.', '0', 3, 1, 0, 0, 0});  // loop forever
+    for (const auto& f : frames) {
+        b.insert(b.end(), {0x21, 0xF9, 4, 0x05});  // disposal none, transparent index 0
+        u16(f.delay_cs);
+        b.insert(b.end(), {0, 0});
+        b.push_back(0x2C);
+        u16(f.x);
+        u16(f.y);
+        u16(f.w);
+        u16(f.h);
+        b.push_back(0);
+        b.push_back(2);  // LZW minimum code size
+        // 3-bit codes, a clear code before every two pixels so the code width never grows.
+        std::vector<std::uint8_t> data;
+        std::uint32_t acc = 0;
+        int bits = 0;
+        auto code = [&](std::uint32_t c) {
+            acc |= c << bits;
+            bits += 3;
+            while (bits >= 8) {
+                data.push_back(static_cast<std::uint8_t>(acc & 0xFF));
+                acc >>= 8;
+                bits -= 8;
+            }
+        };
+        const int n = f.w * f.h;
+        for (int i = 0; i < n; ++i) {
+            if (i % 2 == 0) code(4);
+            code(f.px.empty() ? f.index : f.px[static_cast<std::size_t>(i)]);
+        }
+        code(5);
+        if (bits > 0) data.push_back(static_cast<std::uint8_t>(acc & 0xFF));
+        for (std::size_t i = 0; i < data.size(); i += 255) {
+            const std::size_t len = std::min<std::size_t>(255, data.size() - i);
+            b.push_back(static_cast<std::uint8_t>(len));
+            b.insert(b.end(), data.begin() + static_cast<std::ptrdiff_t>(i), data.begin() + static_cast<std::ptrdiff_t>(i + len));
+        }
+        b.push_back(0);
+    }
+    b.push_back(0x3B);
+    std::ofstream(path, std::ios::binary).write(reinterpret_cast<const char*>(b.data()), static_cast<std::streamsize>(b.size()));
+}
+// A transparent canvas, then `n` one-pixel frames: a small file of n full-size frames.
+std::vector<GifRect> pixel_frames(int width, int height, int n) {
+    std::vector<GifRect> f{{0, 0, width, height, 0, 10, {}}};
+    for (int i = 1; i < n; ++i) f.push_back({i % width, 0, 1, 1, static_cast<std::uint8_t>(1 + i % 3), 10, {}});
+    return f;
+}
+}  // namespace
+
 TEST_CASE("an animated GIF is converted once into a sprite and a clip with alpha, bounded by the RAM budget") {
     const auto dir = std::filesystem::temp_directory_path() / "mtp-anim-unit";
     std::filesystem::remove_all(dir);
     std::filesystem::create_directories(dir);
-    auto ffmpeg = [&](const std::string& args) { return std::system(("ffmpeg -hide_banner -loglevel error -y " + args).c_str()); };
     // 4 frames of 0.1 s: a red square on a transparent background.
     const auto small = (dir / "square.gif").string();
-    REQUIRE(ffmpeg("-f lavfi -i \"color=c=black@0.0:s=64x36:r=10:d=0.4,format=rgba,"
-                   "geq=r=255:g=0:b=0:a='if(between(X,8,23)*between(Y,8,23),255,0)'\" "
-                   "-vf \"split[a][b];[a]palettegen=reserve_transparent=1[p];[b][p]paletteuse=alpha_threshold=128\" -loop 0 " + small) == 0);
-    // A small file with many full-size frames: 20 identical 1280x720 frames.
+    std::vector<std::uint8_t> canvas(64 * 36, 0);
+    for (int y = 8; y < 24; ++y)
+        for (int x = 8; x < 24; ++x) canvas[static_cast<std::size_t>(y * 64 + x)] = 1;
+    write_gif(small, 64, 36, {{0, 0, 64, 36, 0, 10, canvas}, {8, 8, 16, 16, 1, 10, {}}, {8, 8, 16, 16, 1, 10, {}}, {8, 8, 16, 16, 1, 10, {}}});
+    // A small file with many frames: 20 frames of 640x360, upscaled to 1280x720 clip frames.
     const auto big = (dir / "big.gif").string();
-    REQUIRE(ffmpeg("-f lavfi -i color=c=blue:s=1280x720:r=10 -frames:v 20 " + big) == 0);
+    write_gif(big, 640, 360, pixel_frames(640, 360, 20));
     // More frames than the limit.
     const auto many = (dir / "many.gif").string();
-    REQUIRE(ffmpeg("-f lavfi -i testsrc=s=16x16:r=100 -frames:v 1001 " + many) == 0);
+    write_gif(many, 16, 16, pixel_frames(16, 16, 1001));
+    // More pixels to decode than the budget allows: 100 frames of 1280x720 (92 Mpx, 64 MB budget = 16 Mpx).
+    const auto huge = (dir / "huge.gif").string();
+    write_gif(huge, 1280, 720, pixel_frames(1280, 720, 100));
+    REQUIRE(std::filesystem::file_size(huge) < 2'000'000);
     VisualInfo info;
     std::string err;
     REQUIRE(probe_visual(big, info, err));
     CHECK(info.frames == 20);
-    CHECK(info.w == 1280);
+    CHECK(info.w == 640);
     CHECK(info.total_s == doctest::Approx(2.0));
 
     Config cfg;
     cfg.library_dir = (dir / "library").string();
-    cfg.ram_budget_mb = 64;  // 20 frames of 720p fill and alpha are 74 MB
+    cfg.ram_budget_mb = 64;  // 20 clip frames at 720p need 20 x 2 x 2.5 MB (fill_key: fill and key)
     const VideoFormat fmt = *parse_format("720p25");
     Library library(cfg);
     library.start();
     const auto a = library.ingest_file(small, "square", nlohmann::json::object(), fmt);
     const auto b = library.ingest_file(big, "big", nlohmann::json::object(), fmt);
     const auto c = library.ingest_file(many, "many", nlohmann::json::object(), fmt);
-    for (const auto* it : {&a, &b, &c}) library.wait_ready(it->id, fmt.name, 60000);
+    const auto d = library.ingest_file(huge, "huge", nlohmann::json::object(), fmt);
+    for (const auto* it : {&a, &b, &c, &d}) library.wait_ready(it->id, fmt.name, 60000);
     library.stop();
 
     const auto ca = library.get(a.id).conversions.at(fmt.name);
@@ -488,6 +564,16 @@ TEST_CASE("an animated GIF is converted once into a sprite and a clip with alpha
     const auto cc = library.get(c.id).conversions.at(fmt.name);
     CHECK(cc.at("status") == "failed");
     CHECK(cc.at("error").get<std::string>().find("more than 1000") != std::string::npos);
+    // Too many pixels to decode for the budget: refused before decoding.
+    const auto cd = library.get(d.id).conversions.at(fmt.name);
+    CHECK(cd.at("status") == "failed");
+    INFO(cd.dump());
+    CHECK(cd.at("error").get<std::string>().find("Mpx to decode") != std::string::npos);
+    // A failed conversion is not queued again by playing it (only by an explicit re-convert).
+    const auto jobs = library.jobs().size();
+    for (int i = 0; i < 50; ++i) library.ensure_format(c.id, fmt);
+    CHECK(library.jobs().size() == jobs);
+    CHECK(library.get(c.id).conversions.at(fmt.name).at("status") == "failed");
     std::filesystem::remove_all(dir);
 }
 

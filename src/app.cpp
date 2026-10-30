@@ -264,6 +264,7 @@ json App::Impl::metrics() const {
         os << "mxl_test_player_source_info{output=\"" << idx << "\",source=\"" << st["source"].value("type", "") << "\",item=\""
            << st.value("item", "") << "\"} 1\n";
     }
+    os << "# TYPE mxl_test_player_ram_budget_used_bytes gauge\nmxl_test_player_ram_budget_used_bytes " << library.ram_used() << "\n";
     int queued = 0, running = 0, failed = 0, done = 0;
     for (const auto& j : library.jobs()) {
         if (j.state == "queued") ++queued;
@@ -338,6 +339,7 @@ void App::Impl::handle(const HttpRequest& req, HttpResponse& res) {
             os << "mxl_test_player_ram_clip_bytes{output=\"" << o->index() << "\"} " << o->ram_bytes() << "\n";
             os << "mxl_test_player_source_info{output=\"" << o->index() << "\",source=\"" << st["source"].value("type", "pattern") << "\"} 1\n";
         }
+        os << "# TYPE mxl_test_player_ram_budget_used_bytes gauge\nmxl_test_player_ram_budget_used_bytes " << library.ram_used() << "\n";
         int counts[4] = {};
         const char* names[] = {"queued", "running", "done", "failed"};
         for (const auto& j : library.jobs()) {
@@ -804,8 +806,7 @@ App::App(Config cfg) : impl_(new Impl(std::move(cfg))) {
     impl_->domain_id = impl_->mxl.domain_id();
     for (int i = 0; i < impl_->cfg.outputs; ++i) {
         auto o = std::make_unique<Output>(i, impl_->cfg.output_configs[static_cast<std::size_t>(i)], impl_->cfg.format, impl_->mxl, impl_->library,
-                                          impl_->node, impl_->cfg.font_dir, impl_->cfg.ram_clip_max_s,
-                                          static_cast<std::uint64_t>(impl_->cfg.ram_budget_mb) << 20);
+                                          impl_->node, impl_->cfg.font_dir, impl_->cfg.ram_clip_max_s);
         o->on_change = [this] { impl_->save_state(); };
         impl_->outputs.push_back(std::move(o));
     }

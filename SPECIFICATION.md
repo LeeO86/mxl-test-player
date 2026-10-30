@@ -246,15 +246,19 @@ For animations (`sprite` items, 1.3.0): the file is decoded once per format, one
 a time (FFmpeg composites GIF and APNG frames with their disposal and transparency),
 into both
 - the moving-box sprite (§5.6): frames of at most `PLAYER_SPRITE_MAX_PX`, with their
-  durations (`sprite.json`), and
+  durations (`sprite.json`), written once (it does not depend on the format) into a
+  temporary directory and renamed, `sprite.json` last, and
 - a **clip with alpha** at the target format: each frame scaled like a still (`fit`),
   converted to a v210 fill and a 10-bit alpha plane (`alpha_mode` as for stills) and
-  appended to `anim-<format>.v210` and `anim-<format>.a10`.
-Bounds: the frames are counted from the packets first; more than 1000 frames or an
-image larger than 8192×8192 fails the conversion with that reason; a sprite that does
-not fit `PLAYER_RAM_BUDGET_MB` fails; a clip that does not fit it (frames × (fill +
-alpha) at the format) is skipped with `clip: false` and `clip_error`, the sprite stays
-usable. Disk: the clip is raw, about 8 MB per animation frame at 1080 lines
+  appended to `anim-<format>.v210.part` and `.a10.part`, renamed over the clip at the end.
+GIF delays of 10 ms or less are 100 ms, as browsers play them.
+Bounds: the frames are counted from the packets first; more than 1000 frames, more
+pixels than 8192×4608 per frame, or more pixels to decode in all than
+`PLAYER_RAM_BUDGET_MB` holds in RGBA (frames × width × height × 4) fails the conversion
+with that reason; a sprite that does not fit the budget fails; a clip that does not fit
+it (frames × the larger of fill + alpha and fill + key at the format) is skipped with
+`clip: false` and `clip_error`, the sprite stays usable. A failed conversion is queued
+again only by a re-convert, not by playing the item. Disk: the clip is raw, about 8 MB per animation frame at 1080 lines
 (33 MB at 2160). The conversion records `frames` (animation frames), `seconds` (one
 loop), `clip` and `clip_frames` (output frames per loop). A sprite converted before
 1.3.0 is converted once more the first time it is played as a source.
@@ -269,7 +273,9 @@ is kept (configurable retention) so changing the platform format later is possib
   larger). Default ProRes 422 HQ in MOV with PCM float audio; record the decision
   and measured decode speed per format.
 - **RAM clip mode** for short items (≤ `PLAYER_RAM_CLIP_MAX_S`, default 20 s, and
-  within a memory budget `PLAYER_RAM_BUDGET_MB`): the converted clip is decoded
+  within the memory budget `PLAYER_RAM_BUDGET_MB`, one budget for the whole process
+  since 1.3.0: every output's RAM clips count, an output's old and new clip both while
+  it switches; a video that does not fit streams from its mezzanine): the converted clip is decoded
   once into raw v210 + float32 in memory when the item is loaded on an output;
   playback is then a memory copy per grain. This guarantees gapless loops for
   stingers, idents and short clips.
@@ -287,8 +293,10 @@ is kept (configurable retention) so changing the platform format later is possib
 - Sources: pattern preset, video item, image item (+ audio signal set or silence),
   playlist. An animated `sprite` item (1.3.0) plays as a source of type `video` (or
   `still`), fired like any clip (`PUT …/source`, then `POST …/transport`): it is read
-  into RAM once (bounded by `PLAYER_RAM_BUDGET_MB`; the `fill_key` key is made from the
-  alpha at load), and each output frame shows the animation frame of its time. One loop
+  into RAM once and shared by every output that plays it (the fill, the `v210a` alpha,
+  and the `fill_key` key per key range, made from the alpha at load), within
+  `PLAYER_RAM_BUDGET_MB`; each output frame shows the animation frame of its time. A
+  playlist entry set through the API needs `frames` = the item's `clip_frames`. One loop
   is the animation's duration rounded to whole output frames (at least 1), so it loops
   seamlessly, seeks, pauses and plays in playlists like a video; its speed is off by at
   most half an output frame per loop. Both fields of an interlaced frame show the same
@@ -296,6 +304,10 @@ is kept (configurable retention) so changing the platform format later is possib
   `still`) and is a keyed source: its alpha goes to the key (§7.2) and the standard
   burn-ins and text stay off unless `on_keyed_stills`. A one-frame animation is a still
   with alpha. An item that cannot play says why in the output status `media_error`.
+  While an item with alpha (a still, an animation) is loading, converting or refused, a
+  keyed output is transparent (alpha 0, `key_min`), not the idle key; stop shows the
+  idle key. Media an output no longer plays is freed by its loader thread, not by the
+  real-time writer.
 - Transport per output: play, pause (holds frame, audio silence or held tone —
   configurable), stop (goes to the output's "idle source", default black + silence),
   restart, step frame (when paused), loop on/off (default on), seek (when not in
@@ -355,7 +367,8 @@ is kept (configurable retention) so changing the platform format later is possib
   `c_src · a_src + c_dst · (1 − a_src)`. 4:2:2 chroma is blended once per pixel pair.
 - Video items and patterns have no key in v1; the key flow then carries full key
   (opaque) or no key (transparent), configurable (default opaque). Since 1.3.0 the
-  `v210a` alpha plane follows the same setting (it was always 0).
+  `v210a` alpha plane follows the same setting (it was always 0). An output that feeds a
+  keyer with graphics should set `idle_key: transparent`.
 
 ---
 
@@ -506,7 +519,7 @@ Operator state is only under `CONFIG_DIR`. Nothing secret is logged or exported.
 
 Metrics (prefix `mxl_test_player_`): `output_state`, `grains_written_total`,
 `underruns_total`, `loops_total`, `source_info` (info gauge), `decode_ahead_frames`,
-`ram_clip_bytes`, `conversion_jobs` (by state), `conversion_duration_seconds`
+`ram_clip_bytes`, `ram_budget_used_bytes` (1.3.0, the process-wide budget), `conversion_jobs` (by state), `conversion_duration_seconds`
 (histogram), `library_items`, `library_bytes`, `upload_bytes_total`.
 Grafana dashboard in `deploy/grafana/`.
 

@@ -167,7 +167,7 @@ nlohmann::json source_to_json(const SourceDesc& s) {
 }
 
 Output::Output(int index, OutputConfig cfg, VideoFormat platform, MxlSession& mxl, Library& library, Uuid node, std::string font_dir,
-               double ram_max_s, std::uint64_t ram_budget_bytes)
+               double ram_max_s)
     : index_(index),
       mxl_(mxl),
       library_(library),
@@ -175,7 +175,6 @@ Output::Output(int index, OutputConfig cfg, VideoFormat platform, MxlSession& mx
       font_dir_(std::move(font_dir)),
       platform_(std::move(platform)),
       ram_max_s_(ram_max_s),
-      ram_budget_(ram_budget_bytes),
       cfg_(std::move(cfg)) {
     fmt_ = cfg_.format.empty() ? platform_ : *parse_format(cfg_.format);
     ids_ = derive_output_ids(node_, index_, fmt_, cfg_.audio_channels, cfg_.key_mode == KeyMode::V210a);
@@ -287,8 +286,11 @@ Output::Media Output::load_media(const SourceDesc& src, const VideoFormat& fmt) 
     const double seconds = fmt.frame_rate.to_double() > 0 ? static_cast<double>(media.frames) / fmt.frame_rate.to_double() : 0;
     const auto mezz = dir / conv.value("mezz", "mezz-" + fmt.name + ".mov");
     const std::uint64_t bytes = static_cast<std::uint64_t>(media.frames) * v210_size(fmt.width, fmt.height);
-    if (seconds <= ram_max_s_ && bytes <= ram_budget_) {
+    // In RAM when short and when it fits the process-wide budget (else it streams).
+    auto hold = seconds <= ram_max_s_ ? library_.reserve_ram(bytes) : nullptr;
+    if (hold) {
         std::string err;
+        media.ram_hold = std::move(hold);
         if (load_mezzanine(mezz.string(), media.clip, err)) {
             media.ram = true;
             media.ready = true;
@@ -297,6 +299,7 @@ Output::Media Output::load_media(const SourceDesc& src, const VideoFormat& fmt) 
             return media;
         }
         log_warn("ram load failed: " + err);
+        media.ram_hold.reset();
     }
     media.ready = fs::exists(mezz);
     media.ram = false;
@@ -311,6 +314,10 @@ Output::Media Output::load_animation(const LibraryItem& item, const fs::path& di
     media.item_id = item.id;
     media.format = fmt.name;
     const auto conv = item.conversions.value(fmt.name, nlohmann::json::object());
+    if (conv.value("status", "") == "failed") {
+        media.error = conv.value("error", "conversion failed");
+        return media;
+    }
     if (conv.value("status", "") != "ready" || !conv.contains("clip")) {
         library_.ensure_format(item.id, fmt);  // also converts a sprite from before 1.3.0 once more
         return media;
@@ -340,58 +347,74 @@ Output::Media Output::load_animation(const LibraryItem& item, const fs::path& di
     const std::size_t n = durations.size();
     const std::size_t full = v210_size(fmt.width, fmt.height);
     const std::size_t a10 = alpha10_size(fmt.width, fmt.height);
-    const std::size_t alpha_bytes = key_mode == KeyMode::V210a ? a10 : key_mode == KeyMode::FillKey ? full : 0;
-    if (n == 0 || n * (full + alpha_bytes) > ram_budget_) {
-        media.error = "clip does not fit PLAYER_RAM_BUDGET_MB";
+    const auto fill_path = dir / ("anim-" + fmt.name + ".v210");
+    const auto a10_path = dir / ("anim-" + fmt.name + ".a10");
+    std::error_code ec;
+    const auto stamp = std::to_string(fs::last_write_time(fill_path, ec).time_since_epoch().count());
+    if (n == 0 || ec) {
+        media.error = "clip files missing; re-convert the item";
         return media;
     }
-    auto read_all = [](const fs::path& p, std::vector<std::uint8_t>& out, std::size_t bytes) {
+    auto read_all = [](const fs::path& p, std::vector<std::uint8_t>& out) {
         std::ifstream in(p, std::ios::binary);
-        out.resize(bytes);
-        return in.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(bytes)) && in.gcount() == static_cast<std::streamsize>(bytes);
+        return in.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(out.size())) &&
+               in.gcount() == static_cast<std::streamsize>(out.size());
     };
-    std::vector<std::uint8_t> fill, alpha;
-    if (!read_all(dir / ("anim-" + fmt.name + ".v210"), fill, n * full) ||
-        (alpha_bytes && !read_all(dir / ("anim-" + fmt.name + ".a10"), alpha, n * a10))) {
-        media.error = "clip files missing or short; re-convert the item";
-        return media;
-    }
-    if (key_mode == KeyMode::FillKey) {
-        // The fill_key key from the alpha, once here and not per grain.
-        std::vector<std::uint8_t> key(n * full);
-        std::vector<std::uint16_t> a(static_cast<std::size_t>(fmt.width)), ky(static_cast<std::size_t>(fmt.width));
-        std::vector<std::uint16_t> kc(static_cast<std::size_t>(fmt.width / 2), kCMid);
-        const std::uint32_t stride = v210_line_stride(fmt.width), astride = alpha10_line_stride(fmt.width);
-        for (std::size_t f = 0; f < n; ++f) {
-            for (int row = 0; row < fmt.height; ++row) {
-                unpack_alpha10_line(alpha.data() + f * a10 + static_cast<std::size_t>(row) * astride, fmt.width, a.data());
-                for (int x = 0; x < fmt.width; ++x) ky[x] = static_cast<std::uint16_t>(alpha_to_key(a[x] / 1023.0, key_min, key_max));
-                pack_v210_line(ky.data(), kc.data(), kc.data(), fmt.width, key.data() + f * full + static_cast<std::size_t>(row) * stride);
+    // Shared by every output playing this item at this format: the fill, the v210a alpha, and the
+    // fill_key key per key range (made from the alpha frame by frame, here and not per grain).
+    const std::string base = item.id + "|" + fmt.name + "|" + stamp;
+    std::string err;
+    media.anim_fill = library_.shared_blob(base + "|fill", n * full, [&](std::vector<std::uint8_t>& out) { return read_all(fill_path, out); }, err);
+    if (media.anim_fill && key_mode == KeyMode::V210a) {
+        media.anim_alpha = library_.shared_blob(base + "|a10", n * a10, [&](std::vector<std::uint8_t>& out) { return read_all(a10_path, out); }, err);
+    } else if (media.anim_fill && key_mode == KeyMode::FillKey) {
+        const std::string k = base + "|key|" + std::to_string(key_min) + "|" + std::to_string(key_max);
+        media.anim_alpha = library_.shared_blob(k, n * full, [&](std::vector<std::uint8_t>& key) {
+            std::ifstream in(a10_path, std::ios::binary);
+            std::vector<std::uint8_t> plane(a10);
+            std::vector<std::uint16_t> a(static_cast<std::size_t>(fmt.width)), ky(static_cast<std::size_t>(fmt.width));
+            std::vector<std::uint16_t> kc(static_cast<std::size_t>(fmt.width / 2), kCMid);
+            const std::uint32_t stride = v210_line_stride(fmt.width), astride = alpha10_line_stride(fmt.width);
+            for (std::size_t f = 0; f < n; ++f) {
+                if (!in.read(reinterpret_cast<char*>(plane.data()), static_cast<std::streamsize>(a10))) return false;
+                for (int row = 0; row < fmt.height; ++row) {
+                    unpack_alpha10_line(plane.data() + static_cast<std::size_t>(row) * astride, fmt.width, a.data());
+                    for (int x = 0; x < fmt.width; ++x) ky[x] = static_cast<std::uint16_t>(alpha_to_key(a[x] / 1023.0, key_min, key_max));
+                    pack_v210_line(ky.data(), kc.data(), kc.data(), fmt.width, key.data() + f * full + static_cast<std::size_t>(row) * stride);
+                }
             }
-        }
-        alpha = std::move(key);
+            return true;
+        }, err);
+    }
+    if (!media.anim_fill || (key_mode != KeyMode::Off && !media.anim_alpha)) {
+        media.anim_fill.reset();
+        media.anim_alpha.reset();
+        media.error = err;
+        return media;
     }
     media.premultiplied = item.alpha_mode == "premultiplied";
     media.ready = true;
     if (n == 1) {
         media.still = true;
         media.frames = 1;
-        media.still_fill = std::move(fill);
-        if (key_mode == KeyMode::V210a) media.still_a10 = std::move(alpha);
-        else if (key_mode == KeyMode::FillKey) media.still_key = std::move(alpha);
+        media.still_fill = media.anim_fill->data;
+        if (key_mode == KeyMode::V210a) media.still_a10 = media.anim_alpha->data;
+        else if (key_mode == KeyMode::FillKey) media.still_key = media.anim_alpha->data;
+        media.anim_fill.reset();
+        media.anim_alpha.reset();
         return media;
     }
     media.anim = true;
     media.frames = conv.value("clip_frames", animation_loop_frames(conv.value("seconds", 0.0), fmt.frame_rate));
-    media.anim_fill = std::move(fill);
-    media.anim_alpha = std::move(alpha);
     media.anim_durations = std::move(durations);
     return media;
 }
 
 void Output::loader_main() {
     int seen = -1;
+    std::vector<std::shared_ptr<const Media>> graveyard;  // freed here once nobody else holds them
     while (!stop_) {
+        std::erase_if(graveyard, [](const std::shared_ptr<const Media>& m) { return m.use_count() == 1; });
         SourceDesc src;
         VideoFormat fmt;
         int ticket = 0;
@@ -409,11 +432,13 @@ void Output::loader_main() {
         {
             std::lock_guard lock(mu_);
             if (media_gen_ == ticket) {
-                published_ = std::make_shared<const Media>(std::move(loaded));
-                const auto pub = published_.load();
+                auto pub = std::make_shared<const Media>(std::move(loaded));
                 ram_bytes_ = 0;
-                if (pub && pub->ram) ram_bytes_ = pub->clip.v210.size() + pub->clip.audio.size() * sizeof(float);
-                if (pub && pub->anim) ram_bytes_ = pub->anim_fill.size() + pub->anim_alpha.size();
+                if (pub->ram) ram_bytes_ = pub->clip.v210.size() + pub->clip.audio.size() * sizeof(float);
+                if (pub->anim) ram_bytes_ = pub->anim_fill->data.size() + (pub->anim_alpha ? pub->anim_alpha->data.size() : 0);
+                // The replaced media goes to the graveyard: the writer may still hold it (and grain
+                // slots its frames), and freeing hundreds of MB there would cost it a frame.
+                if (auto old = published_.exchange(std::move(pub))) graveyard.push_back(std::move(old));
                 seen = ticket;
             }
         }
@@ -490,10 +515,12 @@ void Output::writer_main() {
         int gen = 0;
         std::string transport;
         bool loop = true;
+        bool src_alpha = false;
         {
             std::lock_guard lock(mu_);
             cfg = cfg_;
             src = source_;
+            src_alpha = load_override_ ? load_src_.alpha_item : source_.alpha_item;
             fmt = fmt_;
             gen = config_gen_;
             transport = transport_;
@@ -574,6 +601,7 @@ void Output::writer_main() {
                     try {
                         const auto item = library_.get(entry.item_id);
                         if (item.type == ItemType::Still) load_src_.type = "still";
+                        load_src_.alpha_item = item.type != ItemType::Video;
                     } catch (...) {
                     }
                     load_override_ = true;
@@ -662,6 +690,20 @@ void Output::writer_main() {
         bool keyed_still = false;
         bool premultiplied = false;
         std::string item_name;
+        auto transparent_key = [&] {
+            if (key && (key_clear.size() != full_bytes || key_clear_y != cfg.key_min)) {
+                key_clear.assign(full_bytes, 0);
+                fill_v210(key_clear.data(), fmt.width, fmt.height, cfg.key_min, kCMid, kCMid);
+                key_clear_y = cfg.key_min;
+                key_clear_token = std::make_shared<int>(0);
+            }
+            if (a10 && a10_clear.size() != a10_bytes) {
+                a10_clear.assign(a10_bytes, 0);
+                a10_clear_token = std::make_shared<int>(0);
+            }
+            if (key) key_src = StillFrame{key_clear.data(), key_clear_token};
+            if (a10) a10_src = StillFrame{a10_clear.data(), a10_clear_token};
+        };
         if (idle || src.type == "pattern" || !media->ready) {
             if (!idle && src.type == "pattern") {
                 PatternRequest req;
@@ -675,23 +717,14 @@ void Output::writer_main() {
                 req.flash = (src.sync_beep || src.pattern == "av_sync") && is_sync_frame(req.frame_index, fmt.frame_rate);
                 fill_src = still_pattern(req);
                 if (!fill_src.data) render_pattern(req, fill);
-                if (req.pattern == VideoPattern::Transparent) {
-                    // Black at alpha 0, whatever the idle key: only the burn-ins are keyed.
-                    if (key && (key_clear.size() != full_bytes || key_clear_y != cfg.key_min)) {
-                        key_clear.assign(full_bytes, 0);
-                        fill_v210(key_clear.data(), fmt.width, fmt.height, cfg.key_min, kCMid, kCMid);
-                        key_clear_y = cfg.key_min;
-                        key_clear_token = std::make_shared<int>(0);
-                    }
-                    if (a10 && a10_clear.size() != a10_bytes) {
-                        a10_clear.assign(a10_bytes, 0);
-                        a10_clear_token = std::make_shared<int>(0);
-                    }
-                    if (key) key_src = StillFrame{key_clear.data(), key_clear_token};
-                    if (a10) a10_src = StillFrame{a10_clear.data(), a10_clear_token};
-                }
+                // Black at alpha 0, whatever the idle key: only the burn-ins are keyed.
+                if (req.pattern == VideoPattern::Transparent) transparent_key();
             } else {
                 fill_src = black_frame(fmt.width, fmt.height);
+                // An item with alpha (a still, an animation) that is loading, converting or was
+                // refused is transparent, not the idle key: a keyer must not show a black frame.
+                // Stop keeps the idle key.
+                if (!idle && src_alpha) transparent_key();
                 // Not ready yet means the loader is still decoding. Keep black on time;
                 // that wait is not an underrun.
             }
@@ -709,16 +742,18 @@ void Output::writer_main() {
             const std::int64_t k = std::clamp<std::int64_t>(media_frame, 0, std::max<std::int64_t>(0, media->frames - 1));
             const int n = static_cast<int>(media->anim_durations.size());
             const auto g = static_cast<std::size_t>(animation_frame_at(k, media->frames, media->anim_durations.data(), n));
-            if (media->anim_fill.size() == static_cast<std::size_t>(n) * full_bytes && g < static_cast<std::size_t>(n)) {
-                const std::uint8_t* p = media->anim_fill.data() + g * full_bytes;
+            const auto& anim_fill = media->anim_fill->data;
+            if (anim_fill.size() == static_cast<std::size_t>(n) * full_bytes && g < static_cast<std::size_t>(n)) {
+                const std::uint8_t* p = anim_fill.data() + g * full_bytes;
                 fill_src = StillFrame{p, std::shared_ptr<const void>(media, p)};
             } else {
                 fill_src = black_frame(fmt.width, fmt.height);
             }
             // Media loaded for another key mode (until the loader has reloaded it) has another size.
             const std::size_t alpha_bytes = key ? full_bytes : a10_bytes;
-            if (alpha_bytes && media->anim_alpha.size() == static_cast<std::size_t>(n) * alpha_bytes && g < static_cast<std::size_t>(n)) {
-                const std::uint8_t* p = media->anim_alpha.data() + g * alpha_bytes;
+            if (alpha_bytes && media->anim_alpha && media->anim_alpha->data.size() == static_cast<std::size_t>(n) * alpha_bytes &&
+                g < static_cast<std::size_t>(n)) {
+                const std::uint8_t* p = media->anim_alpha->data.data() + g * alpha_bytes;
                 (key ? key_src : a10_src) = StillFrame{p, std::shared_ptr<const void>(media, p)};
             }
             premultiplied = media->premultiplied;
@@ -785,6 +820,8 @@ void Output::writer_main() {
                     for (const auto& fr : meta.value("frames", nlohmann::json::array())) {
                         std::ifstream f(dir / "sprite" / fr.value("file", ""), std::ios::binary);
                         std::vector<std::uint8_t> px(std::istreambuf_iterator<char>(f), {});
+                        // A frame of another size (a file cut short) is skipped, not read past.
+                        if (px.size() != static_cast<std::size_t>(sprites_[i].w) * sprites_[i].h * 4) continue;
                         sprites_[i].frames.push_back(std::move(px));
                         sprites_[i].durations.push_back(fr.value("duration", 0.1));
                     }
@@ -1022,9 +1059,17 @@ void Output::library_changed() {
 
 void Output::set_source(const SourceDesc& src) {
     std::function<void()> cb;
+    bool alpha_item = false;
+    if ((src.type == "video" || src.type == "still") && !src.item_id.empty()) {
+        try {
+            alpha_item = library_.get(src.item_id).type != ItemType::Video;
+        } catch (...) {
+        }
+    }
     {
         std::lock_guard lock(mu_);
         source_ = src;
+        source_.alpha_item = alpha_item;
         if (src.pattern == "av_sync") source_.sync_beep = true;
         origin_valid_ = false;
         origin_media_ = 0;

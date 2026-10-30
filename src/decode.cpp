@@ -211,19 +211,29 @@ struct Opened {
         }
         const auto* par = fmt->streams[vindex]->codecpar;
         if (static_cast<std::int64_t>(par->width) * par->height > kMaxImagePixels) {
-            error = "image is " + std::to_string(par->width) + "x" + std::to_string(par->height) + ", larger than 8192x8192";
+            error = "image is " + std::to_string(par->width) + "x" + std::to_string(par->height) + ", more pixels than 8192x4608";
             return false;
         }
         return true;
     }
 };
 
-double frame_seconds(std::int64_t duration, AVRational tb) {
+// A frame's duration; 0.1 s when it has none. A GIF delay of 10 ms or less is 100 ms, as browsers
+// play it (such GIFs are made for that).
+double frame_seconds(std::int64_t duration, AVRational tb, bool gif) {
     const double d = duration > 0 ? duration * av_q2d(tb) : 0.0;
-    return d > 0 ? d : 0.1;
+    if (d <= 0 || (gif && d <= 0.0105)) return 0.1;
+    return d;
 }
 
 }  // namespace
+
+std::string probe_video_codec(const std::string& path) {
+    Opened in;
+    std::string error;
+    if (!in.open(path, error)) return {};
+    return avcodec_get_name(in.fmt->streams[in.vindex]->codecpar->codec_id);
+}
 
 bool probe_visual(const std::string& path, VisualInfo& info, std::string& error) {
     Opened in;
@@ -236,7 +246,7 @@ bool probe_visual(const std::string& path, VisualInfo& info, std::string& error)
     while (av_read_frame(in.fmt, pkt) >= 0) {
         if (pkt->stream_index == in.vindex) {
             ++info.frames;
-            info.total_s += frame_seconds(pkt->duration, st->time_base);
+            info.total_s += frame_seconds(pkt->duration, st->time_base, st->codecpar->codec_id == AV_CODEC_ID_GIF);
         }
         av_packet_unref(pkt);
     }
@@ -284,7 +294,7 @@ bool decode_visual_frames(const std::string& path, const std::function<bool(cons
                     uint8_t* dst[4] = {buf.px.data(), nullptr, nullptr, nullptr};
                     int lines[4] = {buf.w * 4, 0, 0, 0};
                     sws_scale(sws, frame->data, frame->linesize, 0, frame->height, dst, lines);
-                    more = on_frame(buf, frame_seconds(frame->duration, st->time_base));
+                    more = on_frame(buf, frame_seconds(frame->duration, st->time_base, st->codecpar->codec_id == AV_CODEC_ID_GIF));
                 }
             }
             av_frame_unref(frame);

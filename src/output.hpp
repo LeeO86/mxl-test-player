@@ -30,12 +30,13 @@ struct SourceDesc {
     std::string item_id;
     std::string playlist_id;
     std::vector<PlaylistEntry> entries;
+    bool alpha_item = false;  // the item has alpha (a still, an animation); set by set_source, not saved
 };
 
 class Output {
 public:
     Output(int index, OutputConfig cfg, VideoFormat platform, MxlSession& mxl, Library& library, Uuid node, std::string font_dir,
-           double ram_max_s, std::uint64_t ram_budget_bytes);
+           double ram_max_s);
     ~Output();
     void start();
     void join();
@@ -73,14 +74,15 @@ private:
         std::string item_id;
         std::string format;
         RamClip clip;
+        std::shared_ptr<void> ram_hold;  // the clip's share of the process-wide RAM budget
         std::vector<std::uint8_t> still_fill;
         std::vector<std::uint8_t> still_key;
         std::vector<std::uint8_t> still_a10;
         bool premultiplied = false;  // the still's fill is premultiplied
         // An animation (GIF, APNG) played as a clip, from RAM: `frames` output frames per loop.
         bool anim = false;
-        std::vector<std::uint8_t> anim_fill;   // one v210 frame per animation frame
-        std::vector<std::uint8_t> anim_alpha;  // per frame: the v210a alpha plane, or the fill_key key; empty without a key
+        std::shared_ptr<const Library::SharedBlob> anim_fill;   // one v210 frame per animation frame (shared by outputs)
+        std::shared_ptr<const Library::SharedBlob> anim_alpha;  // per frame: the v210a alpha plane, or the fill_key key; null without a key
         std::vector<double> anim_durations;
         std::string error;  // why the item cannot play (status `media_error`)
         std::int64_t frames = 1;
@@ -107,7 +109,6 @@ private:
     std::string font_dir_;
     VideoFormat platform_;
     double ram_max_s_ = 20;
-    std::uint64_t ram_budget_ = 4096ull << 20;
 
     mutable std::mutex mu_;
     OutputConfig cfg_;

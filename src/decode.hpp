@@ -21,7 +21,8 @@ enum class ScaleMode { Fit, Fill, Center, SpriteMax };
 // frames, or an image with more pixels, is refused with a clear error (a small GIF can hold
 // thousands of full-size frames).
 constexpr int kMaxAnimationFrames = 1000;
-constexpr std::int64_t kMaxImagePixels = 8192LL * 8192LL;
+// 8K UHD (7680x4320) fits; the RGBA buffers of one frame are then at most 150 MB each.
+constexpr std::int64_t kMaxImagePixels = 8192LL * 4608LL;
 
 struct VisualInfo {
     int w = 0;
@@ -30,12 +31,16 @@ struct VisualInfo {
     double total_s = 0;  // sum of the frame durations
 };
 
+// The codec name of the file's video stream ("gif", "png", "h264", …), read with libavformat; empty
+// when it has none. Used when ffprobe gives nothing.
+std::string probe_video_codec(const std::string& path);
+
 // Size, frame count and duration of an image or animation from its packets, without decoding.
 bool probe_visual(const std::string& path, VisualInfo& info, std::string& error);
 
 // Decodes every frame once, in order, to RGBA at the source size (FFmpeg composites GIF and
 // APNG frames onto the canvas, with transparency), and calls `on_frame` with the frame and its
-// duration in seconds (0.1 when the file has none). `on_frame` returns false to stop. Fails on a
+// duration in seconds (0.1 when the file has none or a GIF says 10 ms or less). `on_frame` returns false to stop. Fails on a
 // decode error, an image larger than kMaxImagePixels or more than kMaxAnimationFrames frames.
 bool decode_visual_frames(const std::string& path, const std::function<bool(const RgbaBuffer&, double)>& on_frame, std::string& error);
 

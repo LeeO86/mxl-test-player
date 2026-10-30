@@ -54,6 +54,44 @@ std::uint64_t dir_bytes(const fs::path& p) {
 
 }  // namespace
 
+std::shared_ptr<void> Library::reserve_ram(std::uint64_t bytes) {
+    auto budget = ram_;
+    std::uint64_t used = budget->used.load();
+    do {
+        if (used + bytes > budget->limit) return nullptr;
+    } while (!budget->used.compare_exchange_weak(used, used + bytes));
+    return std::shared_ptr<void>(new char, [budget, bytes](void* p) {
+        delete static_cast<char*>(p);
+        budget->used -= bytes;
+    });
+}
+
+std::uint64_t Library::ram_used() const { return ram_->used.load(); }
+std::uint64_t Library::ram_budget() const { return ram_->limit; }
+
+std::shared_ptr<const Library::SharedBlob> Library::shared_blob(const std::string& key, std::uint64_t bytes,
+                                                                const std::function<bool(std::vector<std::uint8_t>&)>& load, std::string& error) {
+    std::lock_guard lock(blob_mu_);
+    for (auto it = blobs_.begin(); it != blobs_.end();) it = it->second.expired() ? blobs_.erase(it) : std::next(it);
+    if (auto found = blobs_[key].lock()) return found;
+    auto hold = reserve_ram(bytes);
+    if (!hold) {
+        error = "PLAYER_RAM_BUDGET_MB (one budget for all outputs) is used up: " + std::to_string(ram_used() >> 20) + " of " +
+                std::to_string(ram_budget() >> 20) + " MB in use, this clip needs " + std::to_string(bytes >> 20) + " MB more";
+        return nullptr;
+    }
+    auto blob = std::make_shared<SharedBlob>();
+    blob->reservation = std::move(hold);
+    blob->data.resize(bytes);
+    if (!load(blob->data)) {
+        if (error.empty()) error = "clip files missing or short; re-convert the item";
+        return nullptr;
+    }
+    std::shared_ptr<const SharedBlob> out = std::move(blob);
+    blobs_[key] = out;
+    return out;
+}
+
 const char* item_type_name(ItemType t) {
     switch (t) {
         case ItemType::Still: return "still";
@@ -69,6 +107,7 @@ ItemType parse_item_type(std::string_view s) {
 }
 
 Library::Library(Config cfg) : cfg_(std::move(cfg)) {
+    ram_->limit = static_cast<std::uint64_t>(std::max(0, cfg_.ram_budget_mb)) << 20;
     std::error_code ec;
     fs::create_directories(cfg_.library_dir, ec);
     load_index();
@@ -183,8 +222,19 @@ void Library::enqueue(const std::string& id, const VideoFormat& format) {
     for (auto& j : jobs_) {
         if (j.item_id == id && j.format == format.name && (j.state == "queued" || j.state == "running")) return;
     }
+    // Finished jobs are kept for the job list, the oldest dropped beyond 100.
+    std::size_t finished = 0;
+    for (const auto& j : jobs_) finished += j.state == "done" || j.state == "failed";
+    for (auto it = jobs_.begin(); finished > 100 && it != jobs_.end();) {
+        if (it->state == "done" || it->state == "failed") {
+            it = jobs_.erase(it);
+            --finished;
+        } else {
+            ++it;
+        }
+    }
     ConvertJob job;
-    job.id = uuid_v5(uuid_namespace_dns(), id + format.name + std::to_string(jobs_.size())).str();
+    job.id = uuid_v5(uuid_namespace_dns(), id + format.name + std::to_string(++job_serial_)).str();
     job.item_id = id;
     job.format = format.name;
     job.state = "queued";
@@ -219,6 +269,7 @@ LibraryItem Library::ingest_file(const std::string& path, const std::string& nam
             ach = st.value("channels", st.value("nb_channels", 0));
         }
     }
+    if (vcodec.empty() && !probed.contains("streams")) vcodec = probe_video_codec(path);  // without ffprobe
     const bool image_codec = vcodec == "png" || vcodec == "mjpeg" || vcodec == "tiff" || vcodec == "webp" || vcodec == "gif" ||
                              vcodec == "apng" || vcodec == "bmp";
     ItemType type = ItemType::Video;
@@ -341,7 +392,9 @@ void Library::ensure_format(const std::string& id, const VideoFormat& format) {
         const auto st = conv.value("status", "");
         // A sprite converted before 1.3.0 has no clip yet: it is converted once more.
         const bool old_sprite = st == "ready" && it.type == ItemType::Sprite && !conv.contains("clip");
-        if ((st == "ready" && !old_sprite) || st == "queued" || st == "running") return;
+        // A failed conversion is not queued again here (each play would queue it again, without
+        // end); only an explicit re-convert does.
+        if ((st == "ready" && !old_sprite) || st == "queued" || st == "running" || st == "failed") return;
         enqueue(id, format);
         return;
     }
@@ -496,9 +549,19 @@ bool Library::convert_one(LibraryItem& item, const VideoFormat& format, ConvertJ
             // PLAYER_RAM_BUDGET_MB, as they are played from RAM; a clip that does not is skipped
             // with clip_error and the sprite stays usable.
             const int sp = cfg_.sprite_max_px;
-            if (static_cast<std::uint64_t>(info.frames) * static_cast<std::uint64_t>(sp) * sp * 4 > budget)
+            const auto frames_n = static_cast<std::uint64_t>(info.frames);
+            // Every frame is decoded at the file's own size: at most as many pixels in all as the
+            // budget holds in RGBA, so a small file of many large frames is refused before decoding.
+            const std::uint64_t decode_px = frames_n * static_cast<std::uint64_t>(info.w) * static_cast<std::uint64_t>(info.h);
+            if (decode_px * 4 > budget)
+                return fail("animation of " + std::to_string(info.frames) + " frames of " + std::to_string(info.w) + "x" + std::to_string(info.h) +
+                            " has " + std::to_string(decode_px / 1000000) + " Mpx to decode, more than PLAYER_RAM_BUDGET_MB allows (" +
+                            std::to_string(budget / 4 / 1000000) + " Mpx)");
+            if (frames_n * static_cast<std::uint64_t>(sp) * sp * 4 > budget)
                 return fail("animation of " + std::to_string(info.frames) + " frames does not fit PLAYER_RAM_BUDGET_MB as a sprite");
-            const std::uint64_t clip_bytes = static_cast<std::uint64_t>(info.frames) * (fill_bytes + a10_bytes);
+            // At play a clip takes the fill and the alpha plane (v210a) or the fill and the key
+            // (fill_key, the larger): that must fit the budget.
+            const std::uint64_t clip_bytes = frames_n * std::max(fill_bytes + a10_bytes, 2 * fill_bytes);
             std::string clip_error;
             if (clip_bytes > budget) {
                 clip_error = "clip needs " + std::to_string(clip_bytes >> 20) + " MB at " + format.name + " (" + std::to_string(info.frames) +
@@ -506,36 +569,49 @@ bool Library::convert_one(LibraryItem& item, const VideoFormat& format, ConvertJ
                 log(clip_error);
             }
             const bool clip = clip_error.empty();
+            std::error_code ec;
             const auto fill_path = dir / ("anim-" + format.name + ".v210");
             const auto a10_path = dir / ("anim-" + format.name + ".a10");
-            std::error_code ec;
-            fs::remove(fill_path, ec);
-            fs::remove(a10_path, ec);
+            const auto fill_part = dir / ("anim-" + format.name + ".v210.part");
+            const auto a10_part = dir / ("anim-" + format.name + ".a10.part");
             std::ofstream fill_out, a10_out;
             if (clip) {
-                fill_out.open(dir / ("anim-" + format.name + ".v210.part"), std::ios::binary);
-                a10_out.open(dir / ("anim-" + format.name + ".a10.part"), std::ios::binary);
+                fill_out.open(fill_part, std::ios::binary);
+                a10_out.open(a10_part, std::ios::binary);
+            }
+            // The sprite does not depend on the format: written once (also kept from before 1.3.0),
+            // into sprite.part and renamed, so the writer never reads a file being written.
+            const bool write_sprite = !fs::exists(dir / "sprite.json");
+            const auto sprite_part = dir / "sprite.part";
+            if (write_sprite) {
+                fs::remove_all(sprite_part, ec);
+                fs::create_directories(sprite_part);
             }
             std::vector<std::uint8_t> fill(clip ? fill_bytes : 0), a10(clip ? a10_bytes : 0);
-            fs::create_directories(dir / "sprite");
             json frames = json::array();
             std::vector<double> durations;
             double total = 0;
+            RgbaFitter sprite_fitter;  // one per size: a scaler is set up for one size
             RgbaBuffer sprite;
             int sw = 0, sh = 0;
+            bool write_failed = false;
             const bool decoded = decode_visual_frames(original.string(), [&](const RgbaBuffer& f, double d) {
-                fitter.fit(f, ScaleMode::SpriteMax, sp, sp, sprite);
-                char name[32];
-                std::snprintf(name, sizeof(name), "frame-%04d.rgba", static_cast<int>(durations.size()));
-                std::ofstream(dir / "sprite" / name, std::ios::binary).write(reinterpret_cast<const char*>(sprite.px.data()), static_cast<std::streamsize>(sprite.px.size()));
-                frames.push_back({{"file", name}, {"duration", d}, {"w", sprite.w}, {"h", sprite.h}});
-                if (durations.empty()) {
-                    sw = sprite.w;
-                    sh = sprite.h;
-                    std::vector<std::uint8_t> rgb(static_cast<std::size_t>(sw) * sh * 3);
-                    for (int p = 0; p < sw * sh; ++p)
-                        for (int c = 0; c < 3; ++c) rgb[static_cast<std::size_t>(p) * 3 + c] = sprite.px[static_cast<std::size_t>(p) * 4 + c];
-                    write_jpeg((dir / "thumb.jpg").string(), rgb.data(), sw, sh, 80);
+                if (write_sprite) {
+                    sprite_fitter.fit(f, ScaleMode::SpriteMax, sp, sp, sprite);
+                    char name[32];
+                    std::snprintf(name, sizeof(name), "frame-%04d.rgba", static_cast<int>(durations.size()));
+                    std::ofstream out(sprite_part / name, std::ios::binary);
+                    out.write(reinterpret_cast<const char*>(sprite.px.data()), static_cast<std::streamsize>(sprite.px.size()));
+                    if (!out) write_failed = true;
+                    frames.push_back({{"file", name}, {"duration", d}, {"w", sprite.w}, {"h", sprite.h}});
+                    if (durations.empty()) {
+                        sw = sprite.w;
+                        sh = sprite.h;
+                        std::vector<std::uint8_t> rgb(static_cast<std::size_t>(sw) * sh * 3);
+                        for (int p = 0; p < sw * sh; ++p)
+                            for (int c = 0; c < 3; ++c) rgb[static_cast<std::size_t>(p) * 3 + c] = sprite.px[static_cast<std::size_t>(p) * 4 + c];
+                        write_jpeg((dir / "thumb.jpg").string(), rgb.data(), sw, sh, 80);
+                    }
                 }
                 durations.push_back(d);
                 total += d;
@@ -544,23 +620,41 @@ bool Library::convert_one(LibraryItem& item, const VideoFormat& format, ConvertJ
                     rgba_to_fill_key(canvas.px.data(), canvas.w, canvas.h, premul, fill.data(), nullptr, a10.data(), 64, 940);
                     fill_out.write(reinterpret_cast<const char*>(fill.data()), static_cast<std::streamsize>(fill.size()));
                     a10_out.write(reinterpret_cast<const char*>(a10.data()), static_cast<std::streamsize>(a10.size()));
+                    if (!fill_out || !a10_out) write_failed = true;
                 }
-                return true;
+                return !write_failed;
             }, err);
             if (clip) {
                 fill_out.close();
                 a10_out.close();
             }
-            if (!decoded || (clip && (!fill_out || !a10_out))) {
-                fs::remove(dir / ("anim-" + format.name + ".v210.part"), ec);
-                fs::remove(dir / ("anim-" + format.name + ".a10.part"), ec);
-                return fail(decoded ? "writing the clip failed" : err);
+            if (write_sprite && !write_failed && decoded) {
+                std::ofstream meta(sprite_part / "sprite.json");
+                meta << json{{"frames", frames}, {"total", total}, {"w", sw}, {"h", sh}}.dump(2);
+                meta.close();
+                if (!meta) write_failed = true;
+            }
+            if (!decoded || write_failed || (clip && (!fill_out || !a10_out))) {
+                fs::remove(fill_part, ec);
+                fs::remove(a10_part, ec);
+                if (write_sprite) fs::remove_all(sprite_part, ec);
+                return fail(decoded ? "writing the conversion failed (disk full?)" : err);
+            }
+            if (write_sprite) {
+                // sprite.json last: the writer reads a sprite only once sprite.json is there.
+                fs::remove_all(dir / "sprite", ec);
+                fs::rename(sprite_part / "sprite.json", dir / "sprite.json.part", ec);
+                fs::rename(sprite_part, dir / "sprite", ec);
+                fs::rename(dir / "sprite.json.part", dir / "sprite.json", ec);
             }
             if (clip) {
-                fs::rename(dir / ("anim-" + format.name + ".v210.part"), fill_path);
-                fs::rename(dir / ("anim-" + format.name + ".a10.part"), a10_path);
+                // Renamed over the clip of an earlier conversion: an output loading it sees the old or the new one.
+                fs::rename(fill_part, fill_path, ec);
+                fs::rename(a10_part, a10_path, ec);
+            } else {
+                fs::remove(fill_path, ec);
+                fs::remove(a10_path, ec);
             }
-            std::ofstream(dir / "sprite.json") << json{{"frames", frames}, {"total", total}, {"w", sw}, {"h", sh}}.dump(2);
             const int n = static_cast<int>(durations.size());
             json conv{{"status", "ready"}, {"frames", n}, {"sprite", true}, {"clip", clip}, {"has_alpha", true}, {"seconds", total}};
             if (clip) conv["clip_frames"] = animation_loop_frames(total, format.frame_rate);
