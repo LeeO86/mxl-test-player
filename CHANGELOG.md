@@ -1,13 +1,13 @@
 # Changelog
 
-## 1.3.1 (unreleased)
+## 1.3.1 (2026-10-30)
 
 ### Fixes
 
 - **The library no longer loses items it has on disk.** Items whose folders and `item.json` were on disk could be missing from the library after a restart, silently. Three causes, all fixed:
   - `index.json` was rewritten in place, and a failed write was ignored: when it could not be written (for example a file the player's user may not write), the running player still listed every item, but the file kept an older list, and the next start loaded only that. The first change after it (a conversion, an upload) then wrote the shorter list, so the items stayed lost. A write that stops halfway (the process killed) left a cut-off file, and the next start loaded no item at all. Now `index.json` and `item.json` are written to a temporary file and renamed over the old one; a failed write is logged (`ERROR library: …`).
   - An `index.json` entry with a field of the wrong type stopped the start with an exception. It is now logged and skipped; the other entries load.
-  - **At start, every item folder whose `item.json` is not in `index.json` is restored from it**, logged as `WARN library: restored <id> (<name>) from its item.json`, and `index.json` is written again. This also brings back items lost this way before 1.3.1 (their folders are still there). The start logs `INFO library: N items (M restored from item.json)`.
+  - **At start, every item folder whose `item.json` is not in `index.json` is restored from it**, logged as `WARN library: restored <id> (<name>) from its item.json`, and `index.json` is written again. This also brings back items lost before 1.3.1 (their folders are still there), and items dropped when an older `index.json` is put back from outside (a backup or a state restore of the library volume). The start logs `INFO library: N items (M restored from item.json)`.
 - A deleted item removes its `item.json` first, so a folder that cannot be removed completely does not come back at the next start.
 - `deploy/k8s/deployment.yaml` sets `strategy: Recreate`: with the default rolling update the old and the new pod ran on the same library at once, and the last one to write `index.json` dropped the items the other had added.
 
