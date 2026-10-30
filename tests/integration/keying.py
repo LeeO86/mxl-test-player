@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""CPU integration: burn-ins go into the alpha. Reads the MXL grains of a v210a output and of a
-fill_key output back (build/player_grain_dump) and checks alpha and key values under a moving box
-and a text box. `--shots DIR` also writes the fill and the key of each case as PNG."""
+"""CPU integration: keying. Reads the MXL grains of a v210a output and of a fill_key output back
+(build/player_grain_dump) and checks alpha and key values: burn-ins (a moving box and a text box),
+the transparent pattern, and an animated GIF and APNG played as a clip at their own frame timing.
+`--shots DIR` also writes the fill and the key of each case as PNG."""
 
 import json
 import os
@@ -163,8 +164,109 @@ def main():
         assert abs(ktext - (64 + round(127 / 255 * 876))) <= 1, ktext
         assert kbg == 64, kbg
         shots(shot_dir, "fillkey-burnin", fill, lambda x, y: max(0, luma(key, x, y) - 64) * 255 // 876)
+        print("burn-ins ok", "v210a box/text/bg", box_a, text_a, bg_a, "key box/text/bg", kbox, ktext, kbg)
+
+        # The transparent pattern: black at alpha 0 whatever the idle key; only the burn-ins are keyed.
+        http("PATCH", "/api/v1/outputs/0", {"key_mode": "v210a", "idle_key": "opaque"})
+        http("PUT", "/api/v1/outputs/0/source", {"type": "pattern", "pattern": "transparent", "audio": "silence"})
+        time.sleep(0.6)
+        st = http("GET", "/api/v1/outputs/0")
+        g = grain(st["video_flow_id"], work)
+        assert alpha(g, W // 2, H // 2) == 0 and luma(g, W // 2, H // 2) == 64, (alpha(g, W // 2, H // 2), luma(g, W // 2, H // 2))
+        assert abs(alpha(g, 60, 20) - round(0.6 * 1023)) <= 1, alpha(g, 60, 20)
+        shots(shot_dir, "transparent-burnin", g, lambda x, y: alpha(g, x, y) >> 2)
+
+        # An animated GIF as a clip: two frames of 0.2 s, a red square left then a green one right on
+        # a transparent background; at 25p each shows for 5 output frames, 10 per loop.
+        gif = work / "anim.gif"
+        subprocess.check_call(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+             "color=c=black@0.0:s=64x36:r=5:d=0.4,format=rgba,"
+             "geq=r='if(N,0,255)':g='if(N,255,0)':b=0:a='if(between(X,8+N*32,23+N*32)*between(Y,8,23),255,0)'",
+             "-vf", "split[a][b];[a]palettegen=reserve_transparent=1[p];[b][p]paletteuse=alpha_threshold=128", "-loop", "0", str(gif)])
+        # An APNG at 50 % alpha (GIF has 1-bit transparency only).
+        apng = work / "half.png"
+        subprocess.check_call(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+             "color=c=white:s=64x36:r=5:d=0.4,format=rgba,geq=r=255:g=255:b=255:a=128", "-plays", "0", "-f", "apng", str(apng)])
+
+        def upload(path):
+            meta = http("POST", "/api/v1/uploads", {"name": path.name, "size": path.stat().st_size, "options": {"fit": "fit"}})
+            http("PUT", f"/api/v1/uploads/{meta['id']}/chunks/0", raw=path.read_bytes())
+            item = http("POST", f"/api/v1/uploads/{meta['id']}/complete", {})
+            deadline = time.time() + 60
+            while time.time() < deadline:
+                conv = http("GET", f"/api/v1/library/{item['id']}")["conversions"].get("720p25", {})
+                if conv.get("status") in ("ready", "failed"):
+                    assert conv["status"] == "ready" and conv.get("clip"), conv
+                    return item, conv
+                time.sleep(0.2)
+            raise SystemExit("conversion timeout")
+
+        gif_item, gif_conv = upload(gif)
+        assert gif_item["type"] == "sprite" and gif_conv["frames"] == 2 and gif_conv["clip_frames"] == 10, gif_conv
+        # Fired as any clip is: PUT the source, then the transport.
+        http("PUT", "/api/v1/outputs/0/burnin", {"label": False, "timecode": False, "frame_counter": False, "item": False, "flow_id": False})
+        http("PUT", "/api/v1/outputs/0/source", {"type": "video", "item_id": gif_item["id"]})
+        http("POST", "/api/v1/outputs/0/transport", {"action": "restart"})
+        deadline = time.time() + 10
+        while not http("GET", "/api/v1/outputs/0")["media_ready"]:
+            assert time.time() < deadline, "clip did not load"
+            time.sleep(0.1)
+        time.sleep(0.5)
+        st = http("GET", "/api/v1/outputs/0")
+        assert st["frames"] == 10 and st["loops"] >= 1 and st["media_error"] == "", st
+        ram = st["ram_bytes"]
+        assert ram == 2 * (STRIDE * H + ASTRIDE * H), ram
+
+        def at(frame):
+            # Pause first: a pause takes the playhead the writer showed last, a seek while paused holds its frame.
+            http("POST", "/api/v1/outputs/0/transport", {"action": "pause"})
+            http("POST", "/api/v1/outputs/0/seek", {"frame": frame})
+            time.sleep(0.3)
+            st = http("GET", "/api/v1/outputs/0")
+            assert st["transport"] == "pause" and st["position"] == frame, (st["transport"], st["position"])
+            return grain(st["video_flow_id"], work)
+
+        # Fit: 64x36 to 1280x720 is 20x; square 1 at x 160..479, square 2 at x 800..1119, y 160..479.
+        f0 = at(2)
+        assert alpha(f0, 320, 320) == 1023 and alpha(f0, 960, 320) == 0 and alpha(f0, 640, 600) == 0
+        assert rgb(f0, 320, 320)[0] > 200 and rgb(f0, 320, 320)[1] < 50, rgb(f0, 320, 320)
+        shots(shot_dir, "gif-frame0", f0, lambda x, y: alpha(f0, x, y) >> 2)
+        f1 = at(7)
+        assert alpha(f1, 320, 320) == 0 and alpha(f1, 960, 320) == 1023
+        assert rgb(f1, 960, 320)[1] > 200 and rgb(f1, 960, 320)[0] < 50, rgb(f1, 960, 320)
+        f1b = at(4)
+        assert alpha(f1b, 320, 320) == 1023  # frame 4 is still the first GIF frame
+        http("POST", "/api/v1/outputs/0/transport", {"action": "play"})
+
+        # The same clip in fill_key: the key at 940 under the square, 64 around.
+        http("PATCH", "/api/v1/outputs/0", {"key_mode": "fill_key"})
+        deadline = time.time() + 10
+        while http("GET", "/api/v1/outputs/0")["ram_bytes"] != 2 * 2 * STRIDE * H:  # reloaded with the key
+            assert time.time() < deadline, "clip did not load"
+            time.sleep(0.1)
+        f0 = at(2)
+        st = http("GET", "/api/v1/outputs/0")
+        key = grain(st["key_flow_id"], work)
+        assert luma(key, 320, 320) == 940 and luma(key, 960, 320) == 64, (luma(key, 320, 320), luma(key, 960, 320))
+        shots(shot_dir, "gif-fillkey", f0, lambda x, y: max(0, luma(key, x, y) - 64) * 255 // 876)
+        http("POST", "/api/v1/outputs/0/transport", {"action": "play"})
+
+        # An APNG with 50 % alpha: alpha 128/255 in the v210a plane.
+        apng_item, apng_conv = upload(apng)
+        assert apng_item["type"] == "sprite", apng_item["type"]
+        http("PATCH", "/api/v1/outputs/0", {"key_mode": "v210a"})
+        http("PUT", "/api/v1/outputs/0/source", {"type": "video", "item_id": apng_item["id"]})
+        deadline = time.time() + 10
+        while not http("GET", "/api/v1/outputs/0")["media_ready"]:
+            assert time.time() < deadline, "clip did not load"
+            time.sleep(0.1)
+        time.sleep(0.4)
+        g = grain(http("GET", "/api/v1/outputs/0")["video_flow_id"], work)
+        assert abs(alpha(g, 640, 360) - round(128 / 255 * 1023)) <= 5, alpha(g, 640, 360)  # one 8-bit step of scaling
         assert http("GET", "/api/v1/outputs/0")["underruns"] == 0
-        print("keying ok", "v210a box/text/bg", box_a, text_a, bg_a, "key box/text/bg", kbox, ktext, kbg)
+        print("keying ok", "gif frames", gif_conv["frames"], "loop", gif_conv["clip_frames"], "ram", ram, "apng alpha", alpha(g, 640, 360))
     finally:
         proc.send_signal(signal.SIGTERM)
         try:

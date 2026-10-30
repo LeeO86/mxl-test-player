@@ -163,6 +163,7 @@ export const PATTERN_GROUPS = [
       { value: "green", label: "Green" },
       { value: "blue", label: "Blue" },
       { value: "grey50", label: "Grey 50 %" },
+      { value: "transparent", label: "Transparent (alpha 0)" },
     ],
   },
   {

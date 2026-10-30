@@ -5,6 +5,7 @@
 #include "decode.hpp"
 #include "overlay.hpp"
 #include "pattern.hpp"
+#include "motion.hpp"
 #include "playlist.hpp"
 #include "v210.hpp"
 
@@ -269,6 +270,7 @@ Output::Media Output::load_media(const SourceDesc& src, const VideoFormat& fmt) 
         media.frames = 1;
         return media;
     }
+    if (item.type == ItemType::Sprite) return load_animation(item, dir, fmt);
     if (item.type != ItemType::Video) return media;
     const auto conv = item.conversions.value(fmt.name, nlohmann::json::object());
     if (conv.value("status", "") != "ready") {
@@ -301,6 +303,92 @@ Output::Media Output::load_media(const SourceDesc& src, const VideoFormat& fmt) 
     return media;
 }
 
+// An animated GIF or APNG played as a source: the frames converted for this format are read into
+// RAM once (bounded by PLAYER_RAM_BUDGET_MB). One frame is a still with alpha.
+Output::Media Output::load_animation(const LibraryItem& item, const fs::path& dir, const VideoFormat& fmt) const {
+    Media media;
+    media.name = item.name;
+    media.item_id = item.id;
+    media.format = fmt.name;
+    const auto conv = item.conversions.value(fmt.name, nlohmann::json::object());
+    if (conv.value("status", "") != "ready" || !conv.contains("clip")) {
+        library_.ensure_format(item.id, fmt);  // also converts a sprite from before 1.3.0 once more
+        return media;
+    }
+    if (!conv.value("clip", false)) {
+        media.error = conv.value("clip_error", "not converted as a clip");
+        return media;
+    }
+    KeyMode key_mode;
+    int key_min, key_max;
+    {
+        std::lock_guard lock(mu_);
+        key_mode = cfg_.key_mode;
+        key_min = cfg_.key_min;
+        key_max = cfg_.key_max;
+    }
+    std::vector<double> durations;
+    try {
+        std::ifstream in(dir / "sprite.json");
+        nlohmann::json meta;
+        in >> meta;
+        for (const auto& fr : meta.value("frames", nlohmann::json::array())) durations.push_back(fr.value("duration", 0.1));
+    } catch (...) {
+        media.error = "sprite.json unreadable";
+        return media;
+    }
+    const std::size_t n = durations.size();
+    const std::size_t full = v210_size(fmt.width, fmt.height);
+    const std::size_t a10 = alpha10_size(fmt.width, fmt.height);
+    const std::size_t alpha_bytes = key_mode == KeyMode::V210a ? a10 : key_mode == KeyMode::FillKey ? full : 0;
+    if (n == 0 || n * (full + alpha_bytes) > ram_budget_) {
+        media.error = "clip does not fit PLAYER_RAM_BUDGET_MB";
+        return media;
+    }
+    auto read_all = [](const fs::path& p, std::vector<std::uint8_t>& out, std::size_t bytes) {
+        std::ifstream in(p, std::ios::binary);
+        out.resize(bytes);
+        return in.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(bytes)) && in.gcount() == static_cast<std::streamsize>(bytes);
+    };
+    std::vector<std::uint8_t> fill, alpha;
+    if (!read_all(dir / ("anim-" + fmt.name + ".v210"), fill, n * full) ||
+        (alpha_bytes && !read_all(dir / ("anim-" + fmt.name + ".a10"), alpha, n * a10))) {
+        media.error = "clip files missing or short; re-convert the item";
+        return media;
+    }
+    if (key_mode == KeyMode::FillKey) {
+        // The fill_key key from the alpha, once here and not per grain.
+        std::vector<std::uint8_t> key(n * full);
+        std::vector<std::uint16_t> a(static_cast<std::size_t>(fmt.width)), ky(static_cast<std::size_t>(fmt.width));
+        std::vector<std::uint16_t> kc(static_cast<std::size_t>(fmt.width / 2), kCMid);
+        const std::uint32_t stride = v210_line_stride(fmt.width), astride = alpha10_line_stride(fmt.width);
+        for (std::size_t f = 0; f < n; ++f) {
+            for (int row = 0; row < fmt.height; ++row) {
+                unpack_alpha10_line(alpha.data() + f * a10 + static_cast<std::size_t>(row) * astride, fmt.width, a.data());
+                for (int x = 0; x < fmt.width; ++x) ky[x] = static_cast<std::uint16_t>(alpha_to_key(a[x] / 1023.0, key_min, key_max));
+                pack_v210_line(ky.data(), kc.data(), kc.data(), fmt.width, key.data() + f * full + static_cast<std::size_t>(row) * stride);
+            }
+        }
+        alpha = std::move(key);
+    }
+    media.premultiplied = item.alpha_mode == "premultiplied";
+    media.ready = true;
+    if (n == 1) {
+        media.still = true;
+        media.frames = 1;
+        media.still_fill = std::move(fill);
+        if (key_mode == KeyMode::V210a) media.still_a10 = std::move(alpha);
+        else if (key_mode == KeyMode::FillKey) media.still_key = std::move(alpha);
+        return media;
+    }
+    media.anim = true;
+    media.frames = conv.value("clip_frames", animation_loop_frames(conv.value("seconds", 0.0), fmt.frame_rate));
+    media.anim_fill = std::move(fill);
+    media.anim_alpha = std::move(alpha);
+    media.anim_durations = std::move(durations);
+    return media;
+}
+
 void Output::loader_main() {
     int seen = -1;
     while (!stop_) {
@@ -325,6 +413,7 @@ void Output::loader_main() {
                 const auto pub = published_.load();
                 ram_bytes_ = 0;
                 if (pub && pub->ram) ram_bytes_ = pub->clip.v210.size() + pub->clip.audio.size() * sizeof(float);
+                if (pub && pub->anim) ram_bytes_ = pub->anim_fill.size() + pub->anim_alpha.size();
                 seen = ticket;
             }
         }
@@ -384,6 +473,10 @@ void Output::writer_main() {
     std::vector<std::uint8_t> a10_idle;
     std::shared_ptr<const void> a10_idle_token;
     int a10_idle_v = -1;
+    // The transparent pattern's key (key_min) and alpha plane (0), packed on first use.
+    std::vector<std::uint8_t> key_clear, a10_clear;
+    std::shared_ptr<const void> key_clear_token, a10_clear_token;
+    int key_clear_y = -1;
     std::vector<std::uint8_t> key_buf;   // the key, unless it is rendered into its grain
     std::vector<std::uint8_t> a10_buf;   // the v210a alpha plane, unless rendered into the grain
     // Grain slots of the video and key flows; forgotten whenever the flows are opened again.
@@ -454,7 +547,7 @@ void Output::writer_main() {
             else media_frame = origin_media_ + std::max<std::int64_t>(0, delta);
         }
         // A video that is still loading has no length yet (it counted a loop per frame).
-        const std::int64_t dur = (src.type == "video" && media->ready && media->frames > 0) ? media->frames : 0;
+        const std::int64_t dur = ((src.type == "video" || media->anim) && media->ready && media->frames > 0) ? media->frames : 0;
         if (dur > 0 && transport == "play") {
             if (loop) {
                 loop_index = media_frame / dur;
@@ -582,6 +675,21 @@ void Output::writer_main() {
                 req.flash = (src.sync_beep || src.pattern == "av_sync") && is_sync_frame(req.frame_index, fmt.frame_rate);
                 fill_src = still_pattern(req);
                 if (!fill_src.data) render_pattern(req, fill);
+                if (req.pattern == VideoPattern::Transparent) {
+                    // Black at alpha 0, whatever the idle key: only the burn-ins are keyed.
+                    if (key && (key_clear.size() != full_bytes || key_clear_y != cfg.key_min)) {
+                        key_clear.assign(full_bytes, 0);
+                        fill_v210(key_clear.data(), fmt.width, fmt.height, cfg.key_min, kCMid, kCMid);
+                        key_clear_y = cfg.key_min;
+                        key_clear_token = std::make_shared<int>(0);
+                    }
+                    if (a10 && a10_clear.size() != a10_bytes) {
+                        a10_clear.assign(a10_bytes, 0);
+                        a10_clear_token = std::make_shared<int>(0);
+                    }
+                    if (key) key_src = StillFrame{key_clear.data(), key_clear_token};
+                    if (a10) a10_src = StillFrame{a10_clear.data(), a10_clear_token};
+                }
             } else {
                 fill_src = black_frame(fmt.width, fmt.height);
                 // Not ready yet means the loader is still decoding. Keep black on time;
@@ -592,6 +700,27 @@ void Output::writer_main() {
             fill_src = media->still_fill.size() == full_bytes ? StillFrame{media->still_fill.data(), media} : black_frame(fmt.width, fmt.height);
             if (media->still_key.size() == full_bytes) key_src = StillFrame{media->still_key.data(), media};
             if (media->still_a10.size() == a10_bytes) a10_src = StillFrame{media->still_a10.data(), media};
+            premultiplied = media->premultiplied;
+            item_name = media->name;
+        } else if (media->anim) {
+            // An animated GIF or APNG as a clip: its frame for this output frame, from RAM. The
+            // token is the frame's own address, so a grain slot that still holds it is not copied.
+            keyed_still = true;
+            const std::int64_t k = std::clamp<std::int64_t>(media_frame, 0, std::max<std::int64_t>(0, media->frames - 1));
+            const int n = static_cast<int>(media->anim_durations.size());
+            const auto g = static_cast<std::size_t>(animation_frame_at(k, media->frames, media->anim_durations.data(), n));
+            if (media->anim_fill.size() == static_cast<std::size_t>(n) * full_bytes && g < static_cast<std::size_t>(n)) {
+                const std::uint8_t* p = media->anim_fill.data() + g * full_bytes;
+                fill_src = StillFrame{p, std::shared_ptr<const void>(media, p)};
+            } else {
+                fill_src = black_frame(fmt.width, fmt.height);
+            }
+            // Media loaded for another key mode (until the loader has reloaded it) has another size.
+            const std::size_t alpha_bytes = key ? full_bytes : a10_bytes;
+            if (alpha_bytes && media->anim_alpha.size() == static_cast<std::size_t>(n) * alpha_bytes && g < static_cast<std::size_t>(n)) {
+                const std::uint8_t* p = media->anim_alpha.data() + g * alpha_bytes;
+                (key ? key_src : a10_src) = StillFrame{p, std::shared_ptr<const void>(media, p)};
+            }
             premultiplied = media->premultiplied;
             item_name = media->name;
         } else if (media->ram && media->clip.frames > 0) {
@@ -845,6 +974,7 @@ nlohmann::json Output::status() const {
                           {"pause_audio", cfg_.pause_audio == PauseAudio::HoldTone ? "hold_tone" : "silence"},
                           {"idle_key", cfg_.idle_key == IdleKey::Transparent ? "transparent" : "opaque"},
                           {"media_ready", media->ready},
+                          {"media_error", media->error},
                           {"item", media->name}};
 }
 

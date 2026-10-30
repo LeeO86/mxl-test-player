@@ -116,7 +116,9 @@ overlays beyond §5.4, scheduling by time of day.
 - Greyscale ramp (horizontal, vertical), luma steps, multiburst/frequency sweep,
   zone plate (static and moving), checkerboard, crosshatch/grid, circle (aspect
   check), safe-area markers, solid colours (black, white, red, green, blue, 50%
-  grey).
+  grey), and **transparent** (1.3.0: black at alpha 0 in the `v210a` alpha plane and
+  `key_min` in the `fill_key` key, whatever the idle key; a keyed output then carries
+  only its burn-ins).
 - **Motion pattern** for freeze detection: a moving element (sweeping bar or
   rotating segment) that changes every frame.
 - **Field-order pattern** (interlaced formats): an object moving in field-steps so
@@ -210,8 +212,9 @@ video, still, playlist):
   upload; optional import from a server directory (`PLAYER_IMPORT_DIR`, watched).
 - Accepted inputs: anything FFmpeg can demux/decode (MOV, MP4, MXF, TS, MKV,
   ProRes, DNxHD/HR, H.264, HEVC, …), still images (PNG, JPEG, TIFF, WebP; alpha kept,
-  §7.2) and animated images for the moving box (GIF, animated WebP, APNG; §5.6).
-  Each item is typed at upload: `video`, `still`, or `sprite`.
+  §7.2) and animated images (GIF, APNG; §5.6, §6.2). Each item is typed at upload:
+  `video`, `still`, or `sprite` (an animated image, also a single-frame GIF). Animated
+  WebP needs an FFmpeg that decodes it (FFmpeg 8); the image's FFmpeg does not.
 - Per item metadata: name, tags, original file info (codec, raster, rate, scan,
   duration, audio layout), conversion status, thumbnail, conversion log.
 
@@ -236,7 +239,25 @@ progress in the UI. For video items:
 4. **Mezzanine encoding** (§6.3) and thumbnail generation.
 
 For images: decode, scale to the target raster (fit/fill/1:1 centred), convert to
-v210 and store one raw frame.
+v210 and store one raw frame. Scaling is done premultiplied (1.3.0), so the colour of
+transparent pixels does not bleed into the edges and the fill is black where the alpha is 0.
+
+For animations (`sprite` items, 1.3.0): the file is decoded once per format, one frame at
+a time (FFmpeg composites GIF and APNG frames with their disposal and transparency),
+into both
+- the moving-box sprite (§5.6): frames of at most `PLAYER_SPRITE_MAX_PX`, with their
+  durations (`sprite.json`), and
+- a **clip with alpha** at the target format: each frame scaled like a still (`fit`),
+  converted to a v210 fill and a 10-bit alpha plane (`alpha_mode` as for stills) and
+  appended to `anim-<format>.v210` and `anim-<format>.a10`.
+Bounds: the frames are counted from the packets first; more than 1000 frames or an
+image larger than 8192×8192 fails the conversion with that reason; a sprite that does
+not fit `PLAYER_RAM_BUDGET_MB` fails; a clip that does not fit it (frames × (fill +
+alpha) at the format) is skipped with `clip: false` and `clip_error`, the sprite stays
+usable. Disk: the clip is raw, about 8 MB per animation frame at 1080 lines
+(33 MB at 2160). The conversion records `frames` (animation frames), `seconds` (one
+loop), `clip` and `clip_frames` (output frames per loop). A sprite converted before
+1.3.0 is converted once more the first time it is played as a source.
 
 Re-conversion: an item can be re-converted with other options; the original upload
 is kept (configurable retention) so changing the platform format later is possible.
@@ -264,7 +285,17 @@ is kept (configurable retention) so changing the platform format later is possib
   audio channel count, burn-in options, ANC timecode (§7.1), key mode (§7.2) and
   **current source**.
 - Sources: pattern preset, video item, image item (+ audio signal set or silence),
-  playlist.
+  playlist. An animated `sprite` item (1.3.0) plays as a source of type `video` (or
+  `still`), fired like any clip (`PUT …/source`, then `POST …/transport`): it is read
+  into RAM once (bounded by `PLAYER_RAM_BUDGET_MB`; the `fill_key` key is made from the
+  alpha at load), and each output frame shows the animation frame of its time. One loop
+  is the animation's duration rounded to whole output frames (at least 1), so it loops
+  seamlessly, seeks, pauses and plays in playlists like a video; its speed is off by at
+  most half an output frame per loop. Both fields of an interlaced frame show the same
+  animation frame. It has no audio (silence as a `video`, the test signal as a
+  `still`) and is a keyed source: its alpha goes to the key (§7.2) and the standard
+  burn-ins and text stay off unless `on_keyed_stills`. A one-frame animation is a still
+  with alpha. An item that cannot play says why in the output status `media_error`.
 - Transport per output: play, pause (holds frame, audio silence or held tone —
   configurable), stop (goes to the output's "idle source", default black + silence),
   restart, step frame (when paused), loop on/off (default on), seek (when not in
@@ -303,7 +334,8 @@ is kept (configurable retention) so changing the platform format later is possib
 
 ### 7.2 Alpha / key output for stills (v1 requirement)
 
-- Image uploads keep their alpha channel (PNG, TIFF, WebP); conversion stores a
+- Image uploads keep their alpha channel (PNG, TIFF, WebP, and GIF/APNG played as a
+  clip, §7); conversion stores a
   fill frame and a key frame at the target format (premultiplied or straight,
   selectable at upload; default straight, as most keyers expect).
 - Per output `key_mode`:
@@ -519,6 +551,10 @@ mezzanine on a Precision 3930 class CPU with zero underruns over 1 h; 2 outputs
   (grain count equals TAI elapsed while text and moving box are edited); the moving
   box position at a given grain index is identical before and after a restart; an
   animated GIF sprite plays at its own frame timing on 50p and 59.94p outputs.
+- Integration (1.3.0, `tests/integration/keying.py`, reading the grains back with
+  `player_grain_dump`): the alpha (`v210a`) and the key (`fill_key`) under a moving box
+  and a text box, the transparent pattern, an animated GIF clip (alpha 1023 under its
+  square, 0 around, the right GIF frame at a seeked output frame) and a 50 % APNG.
 - Integration: ANC timecode flow decodes (12M-2 ATC) to the same value as the
   burn-in for every grain over 60 s, including 29.97 drop-frame; a PNG with alpha
   in `fill_key` mode produces fill and key flows with identical grain indices and

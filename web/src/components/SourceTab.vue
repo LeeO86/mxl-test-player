@@ -47,7 +47,8 @@ const TYPES = [
   { value: "playlist", label: "Playlist" },
 ];
 const signal = computed(() => SIGNALS.find((s) => s.value === src.value?.audio) || SIGNALS[0]);
-const items = (type) => live.library.filter((i) => i.type === type);
+// Animated GIFs and APNGs (sprites) play as a clip with their alpha, a one-frame one as a still.
+const items = (type) => live.library.filter((i) => i.type === type || i.type === "sprite");
 const ready = (item) => item.conversions?.[o.value?.format]?.status === "ready";
 const hasAudioChoice = computed(() => src.value && (src.value.type === "pattern" || src.value.type === "still"));
 
@@ -136,7 +137,7 @@ const dirtyField = (k) => (k in setupChanges.value ? "dirty" : "");
             <option v-for="i in items(src.type)" :key="i.id" :value="i.id">{{ i.name }}{{ ready(i) ? "" : ` (not converted for ${o.format} yet)` }}</option>
           </select>
           <p v-if="!items(src.type).length" class="note">No {{ src.type }} items yet: upload one on the Library tab.</p>
-          <p v-else-if="src.type === 'video'" class="note">A video plays its own audio, gapless in a loop when Loop is on.</p>
+          <p v-else-if="src.type === 'video'" class="note">A video plays its own audio, gapless in a loop when Loop is on. An animated GIF or APNG plays at its own frame timing with its alpha, without audio.</p>
         </template>
 
         <template v-else>

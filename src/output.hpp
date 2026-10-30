@@ -8,6 +8,7 @@
 #include "playlist.hpp"
 
 #include <atomic>
+#include <filesystem>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -76,6 +77,12 @@ private:
         std::vector<std::uint8_t> still_key;
         std::vector<std::uint8_t> still_a10;
         bool premultiplied = false;  // the still's fill is premultiplied
+        // An animation (GIF, APNG) played as a clip, from RAM: `frames` output frames per loop.
+        bool anim = false;
+        std::vector<std::uint8_t> anim_fill;   // one v210 frame per animation frame
+        std::vector<std::uint8_t> anim_alpha;  // per frame: the v210a alpha plane, or the fill_key key; empty without a key
+        std::vector<double> anim_durations;
+        std::string error;  // why the item cannot play (status `media_error`)
         std::int64_t frames = 1;
         int channels = 0;
         std::string name;
@@ -91,6 +98,7 @@ private:
     void reopen(const OutputConfig& cfg, const VideoFormat& fmt);
     AudioProgram program_for(const SourceDesc& src, int channels) const;
     Media load_media(const SourceDesc& src, const VideoFormat& fmt) const;
+    Media load_animation(const LibraryItem& item, const std::filesystem::path& dir, const VideoFormat& fmt) const;
 
     int index_;
     MxlSession& mxl_;

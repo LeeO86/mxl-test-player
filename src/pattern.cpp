@@ -314,6 +314,7 @@ VideoPattern parse_video_pattern(std::string_view s) {
     if (s == "circle") return VideoPattern::Circle;
     if (s == "safe_area") return VideoPattern::SafeArea;
     if (s == "black") return VideoPattern::Black;
+    if (s == "transparent") return VideoPattern::Transparent;
     if (s == "white") return VideoPattern::White;
     if (s == "red") return VideoPattern::Red;
     if (s == "green") return VideoPattern::Green;
@@ -350,6 +351,7 @@ const char* video_pattern_name(VideoPattern p) {
         case VideoPattern::Motion: return "motion";
         case VideoPattern::FieldOrder: return "field_order";
         case VideoPattern::AvSync: return "av_sync";
+        case VideoPattern::Transparent: return "transparent";
         default: return "smpte_rp219";
     }
 }
@@ -378,7 +380,8 @@ void render_raster(const PatternRequest& req, int w, int h, bool flash, std::uin
         case VideoPattern::Grid: grid(r); break;
         case VideoPattern::Circle: circle(r); break;
         case VideoPattern::SafeArea: safe_area(r); break;
-        case VideoPattern::Black: solid(r, 0, 0, 0); break;
+        case VideoPattern::Black:
+        case VideoPattern::Transparent: solid(r, 0, 0, 0); break;
         case VideoPattern::White: solid(r, 1, 1, 1); break;
         case VideoPattern::Red: solid(r, 1, 0, 0); break;
         case VideoPattern::Green: solid(r, 0, 1, 0); break;

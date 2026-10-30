@@ -1,6 +1,7 @@
 #include "media.hpp"
 
 #include "conform.hpp"
+#include "motion.hpp"
 #include "decode.hpp"
 #include "process.hpp"
 #include "util.hpp"
@@ -336,8 +337,11 @@ void Library::ensure_format(const std::string& id, const VideoFormat& format) {
     std::lock_guard lock(mu_);
     for (const auto& it : items_) {
         if (it.id != id) continue;
-        const auto st = it.conversions.value(format.name, json::object()).value("status", "");
-        if (st == "ready" || st == "queued" || st == "running") return;
+        const auto conv = it.conversions.value(format.name, json::object());
+        const auto st = conv.value("status", "");
+        // A sprite converted before 1.3.0 has no clip yet: it is converted once more.
+        const bool old_sprite = st == "ready" && it.type == ItemType::Sprite && !conv.contains("clip");
+        if ((st == "ready" && !old_sprite) || st == "queued" || st == "running") return;
         enqueue(id, format);
         return;
     }
@@ -448,78 +452,121 @@ bool Library::convert_one(LibraryItem& item, const VideoFormat& format, ConvertJ
             job.error.clear();
         };
         if (item.type == ItemType::Still || item.type == ItemType::Sprite) {
-            SpriteSequence seq;
-            std::string err;
-            const bool sprite = item.type == ItemType::Sprite;
-            const ScaleMode mode = sprite ? ScaleMode::SpriteMax
-                                          : item.fit == "fill" ? ScaleMode::Fill
-                                          : item.fit == "center" || item.fit == "1:1" ? ScaleMode::Center
-                                                                                      : ScaleMode::Fit;
-            const int bw = sprite ? cfg_.sprite_max_px : format.width;
-            const int bh = sprite ? cfg_.sprite_max_px : format.height;
-            if (!decode_visual(original.string(), mode, bw, bh, seq, err)) {
+            auto fail = [&](const std::string& err) {
+                log("failed: " + err);
                 job.error = err;
                 item.conversions[format.name] = json{{"status", "failed"}, {"error", err}};
                 return false;
-            }
-            if (!sprite && seq.frames.size() > 1) {
-                // A multi-frame image uploaded as a still is a sprite.
-                item.type = ItemType::Sprite;
-            }
-            if (item.type == ItemType::Sprite) {
-                fs::create_directories(dir / "sprite");
-                json frames = json::array();
-                double total = 0;
-                int i = 0;
-                for (const auto& f : seq.frames) {
-                    char name[32];
-                    std::snprintf(name, sizeof(name), "frame-%04d.rgba", i);
-                    std::ofstream out(dir / "sprite" / name, std::ios::binary);
-                    out.write(reinterpret_cast<const char*>(f.px.data()), static_cast<std::streamsize>(f.px.size()));
-                    const double d = seq.durations[static_cast<std::size_t>(i)];
-                    total += d;
-                    frames.push_back({{"file", name}, {"duration", d}, {"w", f.w}, {"h", f.h}});
-                    ++i;
-                }
-                json meta{{"frames", frames}, {"total", total}, {"w", seq.w}, {"h", seq.h}};
-                std::ofstream mf(dir / "sprite.json");
-                mf << meta.dump(2);
-                if (!seq.frames.empty()) {
-                    // thumb from first frame
-                    std::vector<std::uint8_t> rgb(static_cast<std::size_t>(seq.w) * seq.h * 3);
-                    for (int p = 0; p < seq.w * seq.h; ++p) {
-                        rgb[p * 3] = seq.frames[0].px[p * 4];
-                        rgb[p * 3 + 1] = seq.frames[0].px[p * 4 + 1];
-                        rgb[p * 3 + 2] = seq.frames[0].px[p * 4 + 2];
-                    }
-                    write_jpeg((dir / "thumb.jpg").string(), rgb.data(), seq.w, seq.h, 80);
-                }
-                item.conversions[format.name] = json{{"status", "ready"}, {"frames", seq.frames.size()}, {"sprite", true}};
-                log("sprite frames " + std::to_string(seq.frames.size()));
+            };
+            // Counted from the packets first: an animation that cannot fit is refused before
+            // anything is decoded.
+            VisualInfo info;
+            std::string err;
+            if (!probe_visual(original.string(), info, err)) return fail(err);
+            if (info.frames > kMaxAnimationFrames)
+                return fail("animation has " + std::to_string(info.frames) + " frames, more than " + std::to_string(kMaxAnimationFrames));
+            // A multi-frame image uploaded as a still is a sprite.
+            if (item.type == ItemType::Still && info.frames > 1) item.type = ItemType::Sprite;
+            const ScaleMode fit = item.fit == "fill" ? ScaleMode::Fill : item.fit == "center" || item.fit == "1:1" ? ScaleMode::Center : ScaleMode::Fit;
+            const bool premul = item.alpha_mode == "premultiplied";
+            const std::uint64_t budget = static_cast<std::uint64_t>(cfg_.ram_budget_mb) << 20;
+            const std::size_t fill_bytes = v210_size(format.width, format.height);
+            const std::size_t a10_bytes = alpha10_size(format.width, format.height);
+            RgbaFitter fitter;
+            RgbaBuffer canvas;
+            if (item.type == ItemType::Still) {
+                std::vector<std::uint8_t> fill(fill_bytes), key(fill_bytes), a10(a10_bytes);
+                const bool decoded = decode_visual_frames(original.string(), [&](const RgbaBuffer& f, double) {
+                    fitter.fit(f, fit, format.width, format.height, canvas);
+                    rgba_to_fill_key(canvas.px.data(), canvas.w, canvas.h, premul, fill.data(), key.data(), a10.data(), 64, 940);
+                    return false;  // a still needs the first frame only
+                }, err);
+                if (!decoded) return fail(err);
+                std::ofstream(dir / ("frame-" + format.name + ".v210"), std::ios::binary).write(reinterpret_cast<const char*>(fill.data()), static_cast<std::streamsize>(fill.size()));
+                std::ofstream(dir / ("key-" + format.name + ".v210"), std::ios::binary).write(reinterpret_cast<const char*>(key.data()), static_cast<std::streamsize>(key.size()));
+                std::ofstream(dir / ("alpha-" + format.name + ".a10"), std::ios::binary).write(reinterpret_cast<const char*>(a10.data()), static_cast<std::streamsize>(a10.size()));
+                v210_to_jpeg((dir / "thumb.jpg").string(), fill.data(), format.width, format.height, 320);
+                item.conversions[format.name] = json{{"status", "ready"}, {"frames", 1}, {"has_alpha", true}, {"audio_samples", 0}};
+                log("still converted");
                 return true;
             }
-            const auto& fr = seq.frames[0];
-            // Still was scaled to the target raster.
-            std::vector<std::uint8_t> fill(v210_size(format.width, format.height));
-            std::vector<std::uint8_t> key(fill.size());
-            std::vector<std::uint8_t> a10(alpha10_size(format.width, format.height));
-            const bool premul = item.alpha_mode == "premultiplied";
-            rgba_to_fill_key(fr.px.data(), fr.w, fr.h, premul, fill.data(), key.data(), a10.data(), 64, 940);
-            {
-                std::ofstream out(dir / ("frame-" + format.name + ".v210"), std::ios::binary);
-                out.write(reinterpret_cast<const char*>(fill.data()), static_cast<std::streamsize>(fill.size()));
+            // An animation (GIF, APNG): decoded once, frame by frame, into the moving-box sprite
+            // (frames of at most PLAYER_SPRITE_MAX_PX) and into a clip at this format (fill and
+            // alpha per frame, item.fit), each frame written out as it comes. Both must fit
+            // PLAYER_RAM_BUDGET_MB, as they are played from RAM; a clip that does not is skipped
+            // with clip_error and the sprite stays usable.
+            const int sp = cfg_.sprite_max_px;
+            if (static_cast<std::uint64_t>(info.frames) * static_cast<std::uint64_t>(sp) * sp * 4 > budget)
+                return fail("animation of " + std::to_string(info.frames) + " frames does not fit PLAYER_RAM_BUDGET_MB as a sprite");
+            const std::uint64_t clip_bytes = static_cast<std::uint64_t>(info.frames) * (fill_bytes + a10_bytes);
+            std::string clip_error;
+            if (clip_bytes > budget) {
+                clip_error = "clip needs " + std::to_string(clip_bytes >> 20) + " MB at " + format.name + " (" + std::to_string(info.frames) +
+                             " frames), more than PLAYER_RAM_BUDGET_MB (" + std::to_string(cfg_.ram_budget_mb) + ")";
+                log(clip_error);
             }
-            {
-                std::ofstream out(dir / ("key-" + format.name + ".v210"), std::ios::binary);
-                out.write(reinterpret_cast<const char*>(key.data()), static_cast<std::streamsize>(key.size()));
+            const bool clip = clip_error.empty();
+            const auto fill_path = dir / ("anim-" + format.name + ".v210");
+            const auto a10_path = dir / ("anim-" + format.name + ".a10");
+            std::error_code ec;
+            fs::remove(fill_path, ec);
+            fs::remove(a10_path, ec);
+            std::ofstream fill_out, a10_out;
+            if (clip) {
+                fill_out.open(dir / ("anim-" + format.name + ".v210.part"), std::ios::binary);
+                a10_out.open(dir / ("anim-" + format.name + ".a10.part"), std::ios::binary);
             }
-            {
-                std::ofstream out(dir / ("alpha-" + format.name + ".a10"), std::ios::binary);
-                out.write(reinterpret_cast<const char*>(a10.data()), static_cast<std::streamsize>(a10.size()));
+            std::vector<std::uint8_t> fill(clip ? fill_bytes : 0), a10(clip ? a10_bytes : 0);
+            fs::create_directories(dir / "sprite");
+            json frames = json::array();
+            std::vector<double> durations;
+            double total = 0;
+            RgbaBuffer sprite;
+            int sw = 0, sh = 0;
+            const bool decoded = decode_visual_frames(original.string(), [&](const RgbaBuffer& f, double d) {
+                fitter.fit(f, ScaleMode::SpriteMax, sp, sp, sprite);
+                char name[32];
+                std::snprintf(name, sizeof(name), "frame-%04d.rgba", static_cast<int>(durations.size()));
+                std::ofstream(dir / "sprite" / name, std::ios::binary).write(reinterpret_cast<const char*>(sprite.px.data()), static_cast<std::streamsize>(sprite.px.size()));
+                frames.push_back({{"file", name}, {"duration", d}, {"w", sprite.w}, {"h", sprite.h}});
+                if (durations.empty()) {
+                    sw = sprite.w;
+                    sh = sprite.h;
+                    std::vector<std::uint8_t> rgb(static_cast<std::size_t>(sw) * sh * 3);
+                    for (int p = 0; p < sw * sh; ++p)
+                        for (int c = 0; c < 3; ++c) rgb[static_cast<std::size_t>(p) * 3 + c] = sprite.px[static_cast<std::size_t>(p) * 4 + c];
+                    write_jpeg((dir / "thumb.jpg").string(), rgb.data(), sw, sh, 80);
+                }
+                durations.push_back(d);
+                total += d;
+                if (clip) {
+                    fitter.fit(f, fit, format.width, format.height, canvas);
+                    rgba_to_fill_key(canvas.px.data(), canvas.w, canvas.h, premul, fill.data(), nullptr, a10.data(), 64, 940);
+                    fill_out.write(reinterpret_cast<const char*>(fill.data()), static_cast<std::streamsize>(fill.size()));
+                    a10_out.write(reinterpret_cast<const char*>(a10.data()), static_cast<std::streamsize>(a10.size()));
+                }
+                return true;
+            }, err);
+            if (clip) {
+                fill_out.close();
+                a10_out.close();
             }
-            v210_to_jpeg((dir / "thumb.jpg").string(), fill.data(), format.width, format.height, 320);
-            item.conversions[format.name] = json{{"status", "ready"}, {"frames", 1}, {"has_alpha", true}, {"audio_samples", 0}};
-            log("still converted");
+            if (!decoded || (clip && (!fill_out || !a10_out))) {
+                fs::remove(dir / ("anim-" + format.name + ".v210.part"), ec);
+                fs::remove(dir / ("anim-" + format.name + ".a10.part"), ec);
+                return fail(decoded ? "writing the clip failed" : err);
+            }
+            if (clip) {
+                fs::rename(dir / ("anim-" + format.name + ".v210.part"), fill_path);
+                fs::rename(dir / ("anim-" + format.name + ".a10.part"), a10_path);
+            }
+            std::ofstream(dir / "sprite.json") << json{{"frames", frames}, {"total", total}, {"w", sw}, {"h", sh}}.dump(2);
+            const int n = static_cast<int>(durations.size());
+            json conv{{"status", "ready"}, {"frames", n}, {"sprite", true}, {"clip", clip}, {"has_alpha", true}, {"seconds", total}};
+            if (clip) conv["clip_frames"] = animation_loop_frames(total, format.frame_rate);
+            else conv["clip_error"] = clip_error;
+            item.conversions[format.name] = conv;
+            log("animation frames " + std::to_string(n) + (clip ? ", clip " + std::to_string(clip_bytes >> 20) + " MB" : ""));
             return true;
         }
 

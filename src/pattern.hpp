@@ -34,7 +34,8 @@ enum class VideoPattern {
     Grey50,
     Motion,
     FieldOrder,
-    AvSync
+    AvSync,
+    Transparent  // black at alpha 0 (v210a) or key_min (fill_key): a keyed output of burn-ins only
 };
 
 VideoPattern parse_video_pattern(std::string_view s);

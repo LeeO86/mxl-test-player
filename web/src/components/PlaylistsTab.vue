@@ -36,7 +36,7 @@ function seconds(e) {
 }
 const total = computed(() => (d.value?.value.entries || []).reduce((sum, e) => sum + seconds(e) * (Number(e.loops) || 1), 0));
 const endless = computed(() => (d.value?.value.entries || []).some((e) => Number(e.loops) === 0));
-const playable = computed(() => live.library.filter((i) => i.type === "video" || i.type === "still"));
+const playable = computed(() => live.library.filter((i) => i.type === "video" || i.type === "still" || i.type === "sprite"));
 const playingOn = (id) => live.outputs.filter((o) => o.source?.type === "playlist" && o.source.playlist_id === id);
 
 function move(i, by) {

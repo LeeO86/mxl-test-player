@@ -87,7 +87,8 @@ export const patchOutput = (index, body) => outputCall("patch", index, "", body)
 /** Item length in frames at an output's format (0 while it is not converted for it). */
 export function itemFrames(item, format) {
   const conv = item?.conversions?.[format];
-  return conv?.status === "ready" ? conv.frames || 1 : 0;
+  if (conv?.status !== "ready") return 0;
+  return item.type === "sprite" ? conv.clip_frames || 1 : conv.frames || 1;  // an animation: output frames per loop
 }
 
 /**
@@ -120,7 +121,7 @@ export async function playItem(index, item) {
   const body =
     item.type === "still"
       ? { type: "still", item_id: item.id, audio: src.audio || "sine", frequency: src.frequency ?? 1000, level_dbfs: src.level_dbfs ?? -18 }
-      : { type: "video", item_id: item.id };
+      : { type: "video", item_id: item.id };  // an animated sprite plays as a clip
   const result = await setSource(index, body);
   if (result) await transport(index, "play");
   return result;

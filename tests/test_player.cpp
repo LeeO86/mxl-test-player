@@ -387,6 +387,110 @@ TEST_CASE("importing the same file again keeps one library item") {
     std::filesystem::remove_all(dir);
 }
 
+TEST_CASE("an animation plays at its own frame timing, mapped onto whole output frames") {
+    // 10 frames of 0.1 s: 1 s per loop.
+    const std::vector<double> even(10, 0.1);
+    CHECK(animation_loop_frames(1.0, Rational{50, 1}) == 50);
+    CHECK(animation_loop_frames(1.0, Rational{25, 1}) == 25);
+    CHECK(animation_loop_frames(1.0, Rational{60000, 1001}) == 60);
+    CHECK(animation_loop_frames(0.07, Rational{50, 1}) == 4);  // 3.5 frames, rounded
+    CHECK(animation_loop_frames(0.001, Rational{25, 1}) == 1);
+    CHECK(animation_loop_frames(0, Rational{25, 1}) == 1);
+    for (std::int64_t k = 0; k < 50; ++k) CHECK(animation_frame_at(k, 50, even.data(), 10) == static_cast<int>(k / 5));
+    CHECK(animation_frame_at(50, 50, even.data(), 10) == 0);  // the next loop
+    CHECK(animation_frame_at(-1, 50, even.data(), 10) == 9);
+    // Uneven delays (0.2, 0.04, 0.16 s) at 25p: 10 output frames, 5 + 1 + 4.
+    const std::vector<double> uneven{0.2, 0.04, 0.16};
+    const auto loop25 = animation_loop_frames(0.4, Rational{25, 1});
+    REQUIRE(loop25 == 10);
+    std::vector<int> seq;
+    for (std::int64_t k = 0; k < loop25; ++k) seq.push_back(animation_frame_at(k, loop25, uneven.data(), 3));
+    CHECK(seq == std::vector<int>{0, 0, 0, 0, 0, 1, 2, 2, 2, 2});
+    // At 59.94 the loop is 24 output frames (23.976 rounded): each frame keeps its share.
+    const auto loop5994 = animation_loop_frames(0.4, Rational{60000, 1001});
+    REQUIRE(loop5994 == 24);
+    int counts[3] = {0, 0, 0};
+    for (std::int64_t k = 0; k < loop5994; ++k) counts[animation_frame_at(k, loop5994, uneven.data(), 3)]++;
+    CHECK(counts[0] == 12);
+    CHECK(counts[1] == 3);
+    CHECK(counts[2] == 9);
+    // One frame is always frame 0.
+    CHECK(animation_frame_at(7, 25, even.data(), 1) == 0);
+}
+
+TEST_CASE("an animated GIF is converted once into a sprite and a clip with alpha, bounded by the RAM budget") {
+    const auto dir = std::filesystem::temp_directory_path() / "mtp-anim-unit";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    auto ffmpeg = [&](const std::string& args) { return std::system(("ffmpeg -hide_banner -loglevel error -y " + args).c_str()); };
+    // 4 frames of 0.1 s: a red square on a transparent background.
+    const auto small = (dir / "square.gif").string();
+    REQUIRE(ffmpeg("-f lavfi -i \"color=c=black@0.0:s=64x36:r=10:d=0.4,format=rgba,"
+                   "geq=r=255:g=0:b=0:a='if(between(X,8,23)*between(Y,8,23),255,0)'\" "
+                   "-vf \"split[a][b];[a]palettegen=reserve_transparent=1[p];[b][p]paletteuse=alpha_threshold=128\" -loop 0 " + small) == 0);
+    // A small file with many full-size frames: 20 identical 1280x720 frames.
+    const auto big = (dir / "big.gif").string();
+    REQUIRE(ffmpeg("-f lavfi -i color=c=blue:s=1280x720:r=10 -frames:v 20 " + big) == 0);
+    // More frames than the limit.
+    const auto many = (dir / "many.gif").string();
+    REQUIRE(ffmpeg("-f lavfi -i testsrc=s=16x16:r=100 -frames:v 1001 " + many) == 0);
+    VisualInfo info;
+    std::string err;
+    REQUIRE(probe_visual(big, info, err));
+    CHECK(info.frames == 20);
+    CHECK(info.w == 1280);
+    CHECK(info.total_s == doctest::Approx(2.0));
+
+    Config cfg;
+    cfg.library_dir = (dir / "library").string();
+    cfg.ram_budget_mb = 64;  // 20 frames of 720p fill and alpha are 74 MB
+    const VideoFormat fmt = *parse_format("720p25");
+    Library library(cfg);
+    library.start();
+    const auto a = library.ingest_file(small, "square", nlohmann::json::object(), fmt);
+    const auto b = library.ingest_file(big, "big", nlohmann::json::object(), fmt);
+    const auto c = library.ingest_file(many, "many", nlohmann::json::object(), fmt);
+    for (const auto* it : {&a, &b, &c}) library.wait_ready(it->id, fmt.name, 60000);
+    library.stop();
+
+    const auto ca = library.get(a.id).conversions.at(fmt.name);
+    CHECK(library.get(a.id).type == ItemType::Sprite);
+    CHECK(ca.at("status") == "ready");
+    CHECK(ca.at("frames") == 4);
+    CHECK(ca.at("clip") == true);
+    CHECK(ca.at("clip_frames") == 10);
+    const auto adir = std::filesystem::path(library.item_dir(a.id));
+    const std::size_t fill = v210_size(fmt.width, fmt.height), alpha = alpha10_size(fmt.width, fmt.height);
+    CHECK(std::filesystem::file_size(adir / "anim-720p25.v210") == 4 * fill);
+    CHECK(std::filesystem::file_size(adir / "anim-720p25.a10") == 4 * alpha);
+    CHECK(std::filesystem::exists(adir / "sprite.json"));
+    // Fit: 64x36 scaled 20x to 1280x720, the square at (160..480, 160..480). Alpha 1023 there, 0 around.
+    std::ifstream ain(adir / "anim-720p25.a10", std::ios::binary);
+    std::vector<std::uint8_t> plane(alpha);
+    ain.read(reinterpret_cast<char*>(plane.data()), static_cast<std::streamsize>(alpha));
+    CHECK(a10_at(plane, fmt.width, 320, 320) == 1023);
+    CHECK(a10_at(plane, fmt.width, 800, 500) == 0);
+    // The fill is black where the alpha is 0 (the GIF's transparent colour is white).
+    std::ifstream fin(adir / "anim-720p25.v210", std::ios::binary);
+    std::vector<std::uint8_t> first(fill);
+    fin.read(reinterpret_cast<char*>(first.data()), static_cast<std::streamsize>(fill));
+    CHECK(luma_at(first, fmt.width, 800, 500) == kYBlack);
+    CHECK(luma_at(first, fmt.width, 320, 320) == rgb_to_yuv709(1, 0, 0).y);
+
+    // Too big as a clip for the budget: refused with a reason, still a sprite.
+    const auto cb = library.get(b.id).conversions.at(fmt.name);
+    CHECK(cb.at("status") == "ready");
+    CHECK(cb.at("clip") == false);
+    CHECK(cb.at("clip_error").get<std::string>().find("PLAYER_RAM_BUDGET_MB") != std::string::npos);
+    CHECK_FALSE(std::filesystem::exists(std::filesystem::path(library.item_dir(b.id)) / "anim-720p25.v210"));
+
+    // Too many frames: refused.
+    const auto cc = library.get(c.id).conversions.at(fmt.name);
+    CHECK(cc.at("status") == "failed");
+    CHECK(cc.at("error").get<std::string>().find("more than 1000") != std::string::npos);
+    std::filesystem::remove_all(dir);
+}
+
 TEST_CASE("v210 pack roundtrip and legal black") {
     const int w = 48, h = 2;
     std::vector<std::uint8_t> buf(v210_size(w, h));

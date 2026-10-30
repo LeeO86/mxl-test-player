@@ -37,12 +37,12 @@ Precedence is environment, then the JSON file (`--config`, else `PLAYER_CONFIG`,
 | `PLAYER_IMPORT_DIR` | empty | Watched import directory |
 | `PLAYER_CONVERT_CONCURRENCY` | `1` | ffmpeg jobs at once |
 | `PLAYER_RAM_CLIP_MAX_S` | `20` | Longest clip kept in RAM |
-| `PLAYER_RAM_BUDGET_MB` | `4096` | RAM budget for clips |
+| `PLAYER_RAM_BUDGET_MB` | `4096` | RAM budget for clips; also the most an animated GIF or APNG clip may take (frames × fill and alpha) |
 | `PLAYER_PREROLL_FRAMES` | `25` | Frames prepared before play |
 | `PLAYER_FONT_DIR` | bundled | Font directory |
 | `PLAYER_WEB_ROOT` | bundled | Built web UI |
 | `PLAYER_UPLOAD_LIMIT_GB` | `20` | Upload limit |
-| `PLAYER_SPRITE_MAX_PX` | `512` | Moving-box sprite size |
+| `PLAYER_SPRITE_MAX_PX` | `512` | Moving-box sprite size (an animation's sprite frames) |
 | `MXL_DOMAIN_SCAN_PATH` | `/Volumes/mxl` | Parent of domain directories. No inputs are scanned |
 | `MXL_OUTPUT_DOMAIN_DIR` | `<scan>/player-<seed>` | This function's domain. Created if missing |
 | `MXL_OUTPUT_DOMAIN_ID` | UUIDv5(seed, `domain`) | Used when the domain is created; a different existing id is logged and kept |
@@ -93,6 +93,8 @@ Precedence is environment, then the JSON file (`--config`, else `PLAYER_CONFIG`,
 | WebSocket | `/api/v1/events` on `WEB_PORT` |
 | GET | `/widgets`, `/widget/transport?output=<n>[&theme=dark\|light\|transparent]` (below) |
 | GET, PATCH | `/x-nmos/node/v1.3/…`, `/x-nmos/connection/v1.1/single/senders/{id}/staged` on `NMOS_PORT` |
+
+Fire a clip with `PUT /api/v1/outputs/{id}/source` (`{"type": "video", "item_id": "<id>"}`, or `still`, `pattern`, `playlist`) and `POST /api/v1/outputs/{id}/transport` (`{"action": "restart"}`). An animated GIF or APNG (`sprite` item) plays the same way, as a loop with its alpha (`v210a` or `fill_key`). The `transparent` pattern is black at alpha 0, for a keyed output of burn-ins only.
 
 `GET /api/v1/config/export` is one JSON document (`version`, informational `deployment`, and `state`). There are no secrets to omit. `POST /api/v1/config/import` restores outputs, presets and playlists. It does not change ports, the registry or the seed. `GET /api/v1/config` remains the live view.
 
