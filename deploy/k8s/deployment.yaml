@@ -6,6 +6,10 @@ metadata:
     app: mxl-test-player
 spec:
   replicas: 1
+  # One player per library: a rolling update ran the old and the new pod on the same volume, and
+  # the index of one overwrote the other's.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: mxl-test-player

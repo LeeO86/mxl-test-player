@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <random>
 #include <sstream>
 
 namespace mtp {
@@ -40,6 +41,52 @@ json probe_json(const std::string& path) {
 
 bool is_animated_codec(const std::string& codec) {
     return codec == "gif" || codec == "apng" || codec == "webp";
+}
+
+// One entry of index.json, or an item.json. Throws on a field of the wrong type.
+LibraryItem item_from_json(const json& el) {
+    LibraryItem it;
+    it.id = el.value("id", "");
+    it.name = el.value("name", it.id);
+    it.type = parse_item_type(el.value("type", "video"));
+    if (el.contains("tags")) {
+        for (const auto& t : el.at("tags")) it.tags.push_back(t.get<std::string>());
+    }
+    it.original = el.value("original", json::object());
+    it.fit = el.value("fit", "fit");
+    it.fps_mode = el.value("fps_mode", "drop");
+    it.alpha_mode = el.value("alpha_mode", "straight");
+    it.loudness = el.value("loudness", false);
+    it.crossfade_ms = el.value("crossfade_ms", 0);
+    it.map_channels = el.value("map_channels", 0);
+    it.conversions = el.value("conversions", json::object());
+    return it;
+}
+
+// Written to a temporary file next to `path` and renamed over it: a reader sees the old file or
+// the new one, never a part of one, and a file that cannot be written leaves the old one as it
+// was. A failure is logged (it was silent before 1.3.1).
+bool write_json_atomic(const fs::path& path, const json& j) {
+    // Unique per write: two processes on one library (an old and a new pod) never share it.
+    const auto tmp = fs::path(path.string() + ".tmp-" + std::to_string(std::random_device{}()));
+    std::error_code ec;
+    {
+        std::ofstream out(tmp, std::ios::trunc);
+        out << j.dump(2, ' ', false, json::error_handler_t::replace);  // invalid UTF-8 does not throw
+        out.close();
+        if (!out) {
+            log_error("library: cannot write " + tmp.string() + "; " + path.filename().string() + " is not updated");
+            fs::remove(tmp, ec);
+            return false;
+        }
+    }
+    fs::rename(tmp, path, ec);
+    if (ec) {
+        log_error("library: cannot replace " + path.string() + " (" + ec.message() + ")");
+        fs::remove(tmp, ec);
+        return false;
+    }
+    return true;
 }
 
 std::uint64_t dir_bytes(const fs::path& p) {
@@ -135,51 +182,78 @@ void Library::stop() {
 }
 
 void Library::load_index() {
-    const auto path = fs::path(cfg_.library_dir) / "index.json";
-    std::ifstream in(path);
-    if (!in) return;
-    json j;
-    try {
-        in >> j;
-    } catch (...) {
-        return;
-    }
-    if (!j.is_array()) return;
-    for (const auto& el : j) {
-        LibraryItem it;
-        it.id = el.value("id", "");
-        it.name = el.value("name", it.id);
-        it.type = parse_item_type(el.value("type", "video"));
-        if (el.contains("tags")) {
-            for (const auto& t : el.at("tags")) it.tags.push_back(t.get<std::string>());
-        }
-        it.original = el.value("original", json::object());
-        it.fit = el.value("fit", "fit");
-        it.fps_mode = el.value("fps_mode", "drop");
-        it.alpha_mode = el.value("alpha_mode", "straight");
-        it.loudness = el.value("loudness", false);
-        it.crossfade_ms = el.value("crossfade_ms", 0);
-        it.map_channels = el.value("map_channels", 0);
-        it.conversions = el.value("conversions", json::object());
+    // A bad entry or a bad index.json is logged and skipped, never the rest with it; an item
+    // that is not in index.json (an entry skipped here, or one a failed write of index.json left
+    // out) is restored from its own item.json.
+    const auto dir = fs::path(cfg_.library_dir);
+    const auto path = dir / "index.json";
+    auto add = [&](LibraryItem it) {
         // Before 1.0.3 a re-import appended the same id again; keep the first entry.
         const bool known = std::any_of(items_.begin(), items_.end(), [&](const LibraryItem& o) { return o.id == it.id; });
-        if (!it.id.empty() && !known) items_.push_back(std::move(it));
+        if (it.id.empty() || known) return false;
+        items_.push_back(std::move(it));
+        return true;
+    };
+    json j = json::array();
+    if (std::ifstream in(path); in) {
+        try {
+            in >> j;
+        } catch (const std::exception& ex) {
+            log_error("library: " + path.string() + " is not valid JSON (" + ex.what() + "); items are restored from their item.json");
+            j = json::array();
+        }
     }
+    if (!j.is_array()) {
+        log_error("library: " + path.string() + " is not a JSON array; items are restored from their item.json");
+        j = json::array();
+    }
+    std::size_t n = 0;
+    for (const auto& el : j) {
+        try {
+            add(item_from_json(el));
+        } catch (const std::exception& ex) {
+            log_warn("library: entry " + std::to_string(n) + " of index.json skipped (" + ex.what() + ")");
+        }
+        ++n;
+    }
+    std::vector<fs::path> dirs;
+    std::error_code ec;
+    for (const auto& ent : fs::directory_iterator(dir, ec)) {
+        if (ent.is_directory(ec) && fs::exists(ent.path() / "item.json", ec)) dirs.push_back(ent.path());
+        // A temporary index left by a write that did not finish.
+        else if (ent.path().filename().string().rfind("index.json.tmp", 0) == 0) fs::remove(ent.path(), ec);
+    }
+    std::sort(dirs.begin(), dirs.end());
+    std::size_t restored = 0;
+    for (const auto& d : dirs) {
+        try {
+            std::ifstream in(d / "item.json");
+            json el;
+            in >> el;
+            auto it = item_from_json(el);
+            if (it.id != d.filename().string()) continue;  // not an item folder of its own
+            const auto name = it.name;
+            if (add(std::move(it))) {
+                ++restored;
+                log_warn("library: restored " + d.filename().string() + " (" + name + ") from its item.json; it was missing from index.json");
+            }
+        } catch (const std::exception& ex) {
+            log_warn("library: " + (d / "item.json").string() + " not read (" + ex.what() + ")");
+        }
+    }
+    if (restored > 0) save_index();
+    log_info("library: " + std::to_string(items_.size()) + " items (" + std::to_string(restored) + " restored from item.json)");
     bytes_ = dir_bytes(cfg_.library_dir);
 }
 
+// Callers hold mu_ (or are the constructor): one writer of index.json at a time in a process.
 void Library::save_index() const {
     json arr = json::array();
     for (const auto& it : items_) arr.push_back(to_json(it));
-    const auto path = fs::path(cfg_.library_dir) / "index.json";
-    std::ofstream out(path);
-    out << arr.dump(2);
+    write_json_atomic(fs::path(cfg_.library_dir) / "index.json", arr);
 }
 
-void Library::save_item(const LibraryItem& it) const {
-    std::ofstream out(fs::path(item_dir(it.id)) / "item.json");
-    out << to_json(it).dump(2);
-}
+void Library::save_item(const LibraryItem& it) const { write_json_atomic(fs::path(item_dir(it.id)) / "item.json", to_json(it)); }
 
 nlohmann::json Library::to_json(const LibraryItem& it) const {
     return json{{"id", it.id},
@@ -349,6 +423,8 @@ bool Library::remove(const std::string& id, std::string& error) {
             return false;
         }
         std::error_code ec;
+        // item.json first: a folder that is not removed completely is not restored at the next start.
+        fs::remove(fs::path(item_dir(id)) / "item.json", ec);
         fs::remove_all(item_dir(id), ec);
         items_.erase(it);
         save_index();

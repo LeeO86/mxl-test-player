@@ -387,6 +387,93 @@ TEST_CASE("importing the same file again keeps one library item") {
     std::filesystem::remove_all(dir);
 }
 
+TEST_CASE("the library loses no item: a bad index entry, a stale or broken index.json, a read-only index.json") {
+    namespace fs = std::filesystem;
+    const auto dir = fs::temp_directory_path() / ("mtp-library-index-" + std::to_string(::getpid()));
+    fs::remove_all(dir);
+    fs::create_directories(dir / "import");
+    Config cfg;
+    cfg.library_dir = (dir / "library").string();
+    const VideoFormat fmt = *parse_format("1080p50");
+    const auto index = dir / "library" / "index.json";
+    std::vector<std::string> ids;
+    {
+        Library library(cfg);  // not started: no conversion workers
+        for (const char* n : {"a.bin", "b.bin", "c.bin", "d.bin"}) {
+            const auto file = (dir / "import" / n).string();
+            std::ofstream(file, std::ios::binary) << "not really a clip " << n;
+            ids.push_back(library.ingest_file(file, n, nlohmann::json::object(), fmt).id);
+        }
+    }
+    auto read_index = [&] {
+        std::ifstream in(index);
+        return nlohmann::json::parse(in);
+    };
+    auto ids_of = [](const std::vector<LibraryItem>& items) {
+        std::vector<std::string> out;
+        for (const auto& it : items) out.push_back(it.id);
+        std::sort(out.begin(), out.end());
+        return out;
+    };
+    auto sorted = ids;
+    std::sort(sorted.begin(), sorted.end());
+    const auto full = read_index();
+    REQUIRE(full.size() == 4);
+
+    // An entry with a field of the wrong type is skipped (and logged), not the entries after it
+    // (before 1.3.1 it threw out of the constructor); its item.json brings the item back.
+    auto bad = full;
+    bad[1]["crossfade_ms"] = "zero";
+    bad[1]["name"] = "renamed in the index only";
+    std::ofstream(index) << bad.dump();
+    {
+        Library library(cfg);
+        CHECK(ids_of(library.list()) == sorted);
+        CHECK(library.get(ids[1]).name == "b.bin");  // from item.json
+        CHECK(library.get(ids[0]).name == "a.bin");
+    }
+    // index.json that lists only some items (a write that did not reach it): the others come back
+    // from their item.json, and index.json lists all again.
+    std::ofstream(index) << nlohmann::json::array({full[0]}).dump();
+    {
+        Library library(cfg);
+        CHECK(ids_of(library.list()) == sorted);
+        CHECK(library.list().front().id == ids[0]);  // index.json order first
+    }
+    CHECK(read_index().size() == 4);
+    // index.json cut short or empty (a write interrupted after it truncated the file).
+    for (const std::string cut : {full.dump(2).substr(0, full.dump(2).size() / 2), std::string()}) {
+        std::ofstream(index) << cut;
+        Library library(cfg);
+        CHECK(ids_of(library.list()) == sorted);
+    }
+    // A deleted item does not come back.
+    {
+        Library library(cfg);
+        std::string err;
+        REQUIRE(library.remove(ids[3], err));
+    }
+    {
+        Library library(cfg);
+        CHECK(library.list().size() == 3);
+        CHECK_FALSE(library.exists(ids[3]));
+    }
+    // index.json is replaced, not written in place: a read-only index.json (a file this user may
+    // not write) is still updated, and no temporary file is left.
+    if (::geteuid() != 0) {
+        fs::permissions(index, fs::perms::owner_read | fs::perms::group_read | fs::perms::others_read);
+        {
+            Library library(cfg);
+            const auto file = (dir / "import" / "e.bin").string();
+            std::ofstream(file, std::ios::binary) << "not really a clip e";
+            library.ingest_file(file, "e.bin", nlohmann::json::object(), fmt);
+        }
+        CHECK(read_index().size() == 4);
+    }
+    for (const auto& ent : fs::directory_iterator(dir / "library")) CHECK(ent.path().filename().string().find(".tmp") == std::string::npos);
+    fs::remove_all(dir);
+}
+
 TEST_CASE("an animation plays at its own frame timing, mapped onto whole output frames") {
     // 10 frames of 0.1 s: 1 s per loop.
     const std::vector<double> even(10, 0.1);
