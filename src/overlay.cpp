@@ -12,7 +12,6 @@ struct Placed {
     int y = 0;
     RgbaImage img;
     double opacity = 1;
-    bool on_key = false;
 };
 
 int anchor_x(const std::string& a, int frame_w, int box_w) {
@@ -121,13 +120,10 @@ const RgbaImage& OverlayRenderer::cached(const std::string& key, const std::stri
     return ins->second;
 }
 
-void OverlayRenderer::apply(std::uint8_t* v210, std::uint8_t* key_v210, const OverlayFrame& frame, std::vector<DrawnRect>* fill_rects,
-                            std::vector<DrawnRect>* key_rects) {
+void OverlayRenderer::apply(std::uint8_t* v210, const AlphaTarget& alpha, const OverlayFrame& frame, std::vector<DrawnRect>* rects) {
+    // On a keyed still the standard burn-ins and text stay off unless on_keyed_stills is set;
+    // enabled moving boxes are drawn.
     const bool keyed = frame.keyed_still;
-    if (keyed && !frame.burnin.on_keyed_stills) {
-        // Standard burn-ins and text stay off. Moving boxes are drawn on fill
-        // unless include_in_key is set, and only when the box itself is enabled.
-    }
     const int fw = frame.format.width;
     const int fh = frame.format.height;
     const bool draw_text = !keyed || frame.burnin.on_keyed_stills;
@@ -248,23 +244,14 @@ void OverlayRenderer::apply(std::uint8_t* v210, std::uint8_t* key_v210, const Ov
         p.x = at.x;
         p.y = at.y;
         p.opacity = at.opacity;
-        p.on_key = box.include_in_key;
         p.img = std::move(img);
         layers.push_back(std::move(p));
     }
 
     for (const auto& layer : layers) {
-        composite_rgba_onto_v210(v210, fw, fh, layer.x, layer.y, layer.img.w, layer.img.h, layer.img.px.data(), layer.opacity);
-        if (fill_rects) fill_rects->push_back({layer.x, layer.y, layer.img.w, layer.img.h});
-        if (key_v210 && layer.on_key && key_rects) key_rects->push_back({layer.x, layer.y, layer.img.w, layer.img.h});
-        if (key_v210 && layer.on_key) {
-            // Raise the key where the overlay is opaque.
-            RgbaImage white = layer.img;
-            for (std::size_t i = 0; i + 3 < white.px.size(); i += 4) {
-                white.px[i] = white.px[i + 1] = white.px[i + 2] = 255;
-            }
-            composite_rgba_onto_v210(key_v210, fw, fh, layer.x, layer.y, white.w, white.h, white.px.data(), layer.opacity);
-        }
+        composite_rgba_over_alpha(v210, alpha, fw, fh, layer.x, layer.y, layer.img.w, layer.img.h, layer.img.px.data(), layer.opacity,
+                                  frame.premultiplied);
+        if (rects) rects->push_back({layer.x, layer.y, layer.img.w, layer.img.h});
     }
 }
 

@@ -148,7 +148,6 @@ function setPct(box, key, value) {
               <option v-for="s in sprites" :key="s.id" :value="s.id">{{ s.name }} ({{ s.type === "sprite" ? "animated" : "still" }})</option>
             </select>
             <input v-model="box.color" type="color" :disabled="box.content !== 'builtin'" :aria-label="`Box ${i + 1} colour`" @input="changed" />
-            <label class="check"><input v-model="box.include_in_key" type="checkbox" @change="changed" /> In the key</label>
           </div>
           <div style="margin-top: 0.4rem">
             <Segmented v-model="box.path" :options="PATHS" :label="`Box ${i + 1} path`" class="small" @update:model-value="changed" />

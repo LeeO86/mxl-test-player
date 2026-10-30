@@ -158,7 +158,7 @@ def main():
 
         burn = st2["burnin"]
         burn["texts"] = [{"text": "LIVE {frame}", "anchor": "mc", "size": 6, "font": "DejaVu Sans", "color": "#FFFFFF", "opacity": 1, "box": True, "box_color": "#000000", "box_opacity": 0.5, "box_padding": 0.3, "outline": False, "shadow": False, "offset_x": 0, "offset_y": 0}]
-        burn["boxes"] = [{"enabled": True, "content": "builtin", "path": "bounce", "speed": 0.2, "size": 0.15, "opacity": 1, "color": "#FFCC00", "include_in_key": False, "start_x": 0, "start_y": 0}]
+        burn["boxes"] = [{"enabled": True, "content": "builtin", "path": "bounce", "speed": 0.2, "size": 0.15, "opacity": 1, "color": "#FFCC00", "start_x": 0, "start_y": 0}]
         before = http("GET", "/api/v1/outputs/0")
         g0 = before["grains"]
         u0 = before["underruns"]

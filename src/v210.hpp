@@ -68,4 +68,30 @@ void composite_rgba_onto_v210(std::uint8_t* v210, int width, int height, int x, 
 // can change (rows and columns clipped to the frame).
 void restore_v210_rect(std::uint8_t* dst, const std::uint8_t* src, int width, int height, int x, int y, int bw, int bh);
 
+// The alpha that goes with a fill: the v210a alpha plane (10 bits, 0 transparent .. 1023 opaque)
+// or the fill_key key frame (v210, alpha as luma from key_min to key_max, chroma at 512).
+struct AlphaTarget {
+    enum class Kind { None, A10, Key };
+    Kind kind = Kind::None;
+    std::uint8_t* data = nullptr;
+    int key_min = kYBlack;
+    int key_max = kYWhite;
+};
+
+// Composites `rgba` (straight alpha, times `opacity`) over the fill and its alpha, "over" as a
+// keyer expects it: a_out = a_src + a_dst * (1 - a_src). A straight fill becomes
+// (c_src * a_src + c_dst * a_dst * (1 - a_src)) / a_out, so over a transparent background it is
+// the layer's own colour; a premultiplied fill becomes c_src * a_src + c_dst * (1 - a_src).
+// Chroma is blended once per 4:2:2 pair, with the pair's mean alphas. Over an opaque background
+// this is the same blend as composite_rgba_onto_v210, but for chroma (once per pair, not twice).
+void composite_rgba_over_alpha(std::uint8_t* v210, const AlphaTarget& alpha, int width, int height, int x, int y, int bw, int bh,
+                               const std::uint8_t* rgba, double opacity, bool premultiplied);
+
+// Copies back from `src` every alpha word (3 pixels) that composite_rgba_over_alpha with the same
+// box can change in a v210a alpha plane. For a fill_key key frame, restore_v210_rect applies.
+void restore_a10_rect(std::uint8_t* dst, const std::uint8_t* src, int width, int height, int x, int y, int bw, int bh);
+
+// A whole alpha plane at one value (0..1023).
+void fill_alpha10(std::uint8_t* dst, int width, int height, int a);
+
 }  // namespace mtp

@@ -8,6 +8,7 @@
 #include "media.hpp"
 #include "motion.hpp"
 #include "nmos.hpp"
+#include "overlay.hpp"
 #include "output.hpp"
 #include "mxl_io.hpp"
 #include "pattern.hpp"
@@ -202,6 +203,162 @@ TEST_CASE("restoring the composited boxes gives back the frame under the overlay
     // Moving patterns have no still frame.
     req.pattern = VideoPattern::Motion;
     CHECK(still_pattern(req).data == nullptr);
+}
+
+namespace {
+int a10_at(const std::vector<std::uint8_t>& plane, int width, int x, int y) {
+    std::vector<std::uint16_t> a(static_cast<std::size_t>(width));
+    unpack_alpha10_line(plane.data() + static_cast<std::size_t>(y) * alpha10_line_stride(width), width, a.data());
+    return a[static_cast<std::size_t>(x)];
+}
+int luma_at(const std::vector<std::uint8_t>& frame, int width, int x, int y) {
+    std::vector<std::uint16_t> l(static_cast<std::size_t>(width)), cb(static_cast<std::size_t>(width / 2)), cr(static_cast<std::size_t>(width / 2));
+    unpack_v210_line(frame.data() + static_cast<std::size_t>(y) * v210_line_stride(width), width, l.data(), cb.data(), cr.data());
+    return l[static_cast<std::size_t>(x)];
+}
+std::vector<std::uint8_t> solid_rgba(int w, int h, std::uint8_t r, std::uint8_t g, std::uint8_t b, std::uint8_t a) {
+    std::vector<std::uint8_t> px(static_cast<std::size_t>(w) * h * 4);
+    for (std::size_t i = 0; i < px.size(); i += 4) {
+        px[i] = r;
+        px[i + 1] = g;
+        px[i + 2] = b;
+        px[i + 3] = a;
+    }
+    return px;
+}
+}  // namespace
+
+TEST_CASE("burn-ins go over the alpha: a_out = a_src + a_dst * (1 - a_src), the fill stays straight") {
+    const int width = 96, height = 4;
+    // Three columns of destination alpha: transparent, half, opaque (v210a codes 0, 512, 1023).
+    std::vector<std::uint8_t> fill(v210_size(width, height));
+    fill_v210(fill.data(), width, height, kYBlack, kCMid, kCMid);
+    std::vector<std::uint8_t> a10(alpha10_size(width, height));
+    std::vector<std::uint16_t> line(static_cast<std::size_t>(width));
+    for (int x = 0; x < width; ++x) line[static_cast<std::size_t>(x)] = x < 32 ? 0 : x < 64 ? 512 : 1023;
+    for (int y = 0; y < height; ++y) pack_alpha10_line(line.data(), width, a10.data() + static_cast<std::size_t>(y) * alpha10_line_stride(width));
+    // White at alpha 128/255 and layer opacity 0.6: a_src = 0.3012.
+    const auto white = solid_rgba(width, height, 255, 255, 255, 128);
+    const double as = 128 / 255.0 * 0.6;
+    AlphaTarget target{AlphaTarget::Kind::A10, a10.data(), kYBlack, kYWhite};
+    composite_rgba_over_alpha(fill.data(), target, width, height, 0, 0, width, height, white.data(), 0.6, false);
+    for (int x : {5, 40, 80}) {
+        const double ad = (x < 32 ? 0 : x < 64 ? 512 : 1023) / 1023.0;
+        const double ao = as + ad * (1 - as);
+        CHECK(a10_at(a10, width, x, 2) == static_cast<int>(ao * 1023 + 0.5));
+        // Straight fill: (c_src a_src + c_dst a_dst (1 - a_src)) / a_out.
+        const double yexp = (940 * as + 64 * ad * (1 - as)) / ao;
+        CHECK(std::abs(luma_at(fill, width, x, 2) - yexp) <= 1.0);
+    }
+    // Over a transparent background the fill is the layer's own colour, not darkened.
+    CHECK(luma_at(fill, width, 5, 0) == 940);
+    // Outside the layer nothing changes.
+    std::vector<std::uint8_t> fill2(v210_size(width, height));
+    fill_v210(fill2.data(), width, height, kYBlack, kCMid, kCMid);
+    std::vector<std::uint8_t> a2(alpha10_size(width, height));
+    AlphaTarget t2{AlphaTarget::Kind::A10, a2.data(), kYBlack, kYWhite};
+    const auto box = solid_rgba(10, 2, 255, 255, 255, 255);
+    composite_rgba_over_alpha(fill2.data(), t2, width, height, 20, 1, 10, 2, box.data(), 1.0, false);
+    CHECK(a10_at(a2, width, 19, 1) == 0);
+    CHECK(a10_at(a2, width, 20, 1) == 1023);
+    CHECK(a10_at(a2, width, 29, 2) == 1023);
+    CHECK(a10_at(a2, width, 30, 2) == 0);
+    CHECK(a10_at(a2, width, 25, 0) == 0);
+    CHECK(a10_at(a2, width, 25, 3) == 0);
+}
+
+TEST_CASE("burn-ins go over the fill_key key with the key range, and premultiplied fills blend linearly") {
+    const int width = 48, height = 2;
+    const int kmin = 64, kmax = 940;
+    std::vector<std::uint8_t> fill(v210_size(width, height));
+    fill_v210(fill.data(), width, height, kYBlack, kCMid, kCMid);
+    std::vector<std::uint8_t> key(v210_size(width, height));
+    fill_v210(key.data(), width, height, kmin, kCMid, kCMid);  // transparent
+    const auto grey = solid_rgba(width, height, 128, 128, 128, 255);
+    AlphaTarget target{AlphaTarget::Kind::Key, key.data(), kmin, kmax};
+    composite_rgba_over_alpha(fill.data(), target, width, height, 0, 0, width, height, grey.data(), 0.5, false);
+    CHECK(luma_at(key, width, 10, 1) == alpha_to_key(0.5, kmin, kmax));
+    const int grey_y = rgb_to_yuv709(128 / 255.0, 128 / 255.0, 128 / 255.0).y;
+    CHECK(luma_at(fill, width, 10, 1) == grey_y);  // straight: the colour itself
+    // A second layer at 0.5 over 0.5: 0.75.
+    composite_rgba_over_alpha(fill.data(), target, width, height, 0, 0, width, height, grey.data(), 0.5, false);
+    CHECK(luma_at(key, width, 10, 1) == alpha_to_key(0.75, kmin, kmax));
+    // Premultiplied: the fill is blended towards black like the old composite.
+    std::vector<std::uint8_t> pfill(v210_size(width, height));
+    fill_v210(pfill.data(), width, height, kYBlack, kCMid, kCMid);
+    std::vector<std::uint8_t> pkey(v210_size(width, height));
+    fill_v210(pkey.data(), width, height, kmin, kCMid, kCMid);
+    AlphaTarget pt{AlphaTarget::Kind::Key, pkey.data(), kmin, kmax};
+    composite_rgba_over_alpha(pfill.data(), pt, width, height, 0, 0, width, height, grey.data(), 0.5, true);
+    CHECK(std::abs(luma_at(pfill, width, 10, 1) - (grey_y * 0.5 + 64 * 0.5)) <= 1.0);
+    CHECK(luma_at(pkey, width, 10, 1) == alpha_to_key(0.5, kmin, kmax));
+    // Without an alpha target it is the plain composite.
+    std::vector<std::uint8_t> a(v210_size(width, height)), b(v210_size(width, height));
+    fill_v210_rgb(a.data(), width, height, 0.2, 0.4, 0.6);
+    b = a;
+    composite_rgba_over_alpha(a.data(), AlphaTarget{}, width, height, 3, 0, 20, 2, grey.data(), 0.7, false);
+    composite_rgba_onto_v210(b.data(), width, height, 3, 0, 20, 2, grey.data(), 0.7);
+    CHECK(a == b);
+}
+
+TEST_CASE("restoring the alpha plane under the composited boxes gives back the plane") {
+    const VideoFormat fmt = *parse_format("720p25");
+    std::vector<std::uint8_t> under(alpha10_size(fmt.width, fmt.height));
+    fill_alpha10(under.data(), fmt.width, fmt.height, 1023);
+    auto plane = under;
+    std::vector<std::uint8_t> fill(v210_size(fmt.width, fmt.height));
+    fill_v210(fill.data(), fmt.width, fmt.height, kYBlack, kCMid, kCMid);
+    std::uint32_t seed = 5;
+    auto rnd = [&]() { seed = seed * 1664525u + 1013904223u; return seed >> 8; };
+    struct Box { int x, y, w, h; };
+    // Transparent under-plane so every drawn pixel changes.
+    fill_alpha10(under.data(), fmt.width, fmt.height, 0);
+    plane = under;
+    const std::vector<Box> boxes{{100, 3, 301, 20}, {-17, -5, 91, 30}, {fmt.width - 50, fmt.height - 10, 120, 25}, {7, 0, 5, 720}, {1, 1, 1, 1}};
+    for (const Box& box : boxes) {
+        std::vector<std::uint8_t> rgba(static_cast<std::size_t>(box.w) * box.h * 4);
+        for (auto& v : rgba) v = static_cast<std::uint8_t>(rnd() | 0x80);
+        AlphaTarget t{AlphaTarget::Kind::A10, plane.data(), kYBlack, kYWhite};
+        composite_rgba_over_alpha(fill.data(), t, fmt.width, fmt.height, box.x, box.y, box.w, box.h, rgba.data(), 0.8, false);
+    }
+    CHECK(plane != under);
+    for (const Box& box : boxes) restore_a10_rect(plane.data(), under.data(), fmt.width, fmt.height, box.x, box.y, box.w, box.h);
+    CHECK(plane == under);
+}
+
+TEST_CASE("every burn-in writes the alpha: text and moving box on a v210a plane") {
+    const VideoFormat fmt = *parse_format("720p25");
+    std::vector<std::uint8_t> fill(v210_size(fmt.width, fmt.height));
+    fill_v210(fill.data(), fmt.width, fmt.height, kYBlack, kCMid, kCMid);
+    std::vector<std::uint8_t> a10(alpha10_size(fmt.width, fmt.height));  // transparent
+    OverlayRenderer overlay(std::string(MTP_SOURCE_DIR) + "/assets/fonts");
+    OverlayFrame of;
+    of.format = fmt;
+    of.burnin = BurnInConfig{};
+    of.burnin.label = of.burnin.timecode = of.burnin.frame_counter = of.burnin.item = of.burnin.flow_id = false;
+    TextLayerConfig t;
+    t.text = "ALPHA";
+    t.anchor = "tl";
+    t.size = 10;
+    t.box = true;
+    t.box_opacity = 0.5;
+    of.burnin.texts.push_back(t);
+    MovingBoxConfig box;
+    box.enabled = true;
+    box.motion.path = MotionPath::Horizontal;
+    box.motion.start_y = 1.0;  // bottom of the frame
+    box.motion.speed = 0;
+    box.motion.opacity = 0.6;
+    of.burnin.boxes.push_back(box);
+    std::vector<DrawnRect> rects;
+    overlay.apply(fill.data(), AlphaTarget{AlphaTarget::Kind::A10, a10.data(), kYBlack, kYWhite}, of, &rects);
+    REQUIRE(rects.size() == 2);
+    // The text's background box at 50 %, the moving box at 60 %, nothing elsewhere.
+    const DrawnRect& tr = rects[0];
+    CHECK(a10_at(a10, fmt.width, tr.x + 1, tr.y + 1) == static_cast<int>(127 / 255.0 * 1023 + 0.5));  // box alpha 127
+    const DrawnRect& br = rects[1];
+    CHECK(a10_at(a10, fmt.width, br.x + br.w / 2, br.y + 2) == static_cast<int>(0.6 * 1023 + 0.5));
+    CHECK(a10_at(a10, fmt.width, fmt.width / 2, fmt.height / 2) == 0);
 }
 
 TEST_CASE("importing the same file again keeps one library item") {

@@ -195,8 +195,10 @@ video, still, playlist):
   speed, size and opacity are changed live in the UI; the box continues from its
   current position (no jump) when parameters change.
 - Up to 2 moving boxes per output.
-- On keyed stills (§7.2) the moving box is drawn on fill only, unless "include in
-  key" is enabled.
+- Every burn-in (standard burn-ins, text layers, moving boxes, sprites) that is drawn
+  on the fill is also drawn into the alpha of a keyed output (§7.2) with its own opacity
+  (1.3.0; before, a moving box went into the `fill_key` key only with "include in key",
+  and nothing went into the `v210a` alpha plane).
 
 ---
 
@@ -314,8 +316,14 @@ is kept (configurable retention) so changing the platform format later is possib
 - NMOS: in `fill_key` mode a second video sender `<output label>:Key` in the same
   group; both senders share timing exactly (same grain index, written together).
 - Burn-ins (§5.4) are not drawn on keyed stills unless enabled explicitly.
+- Burn-ins composite "over" the alpha (1.3.0): `a_out = a_src + a_dst · (1 − a_src)`, in the
+  `v210a` alpha plane and in the `fill_key` key (at `key_min`..`key_max`). The fill stays
+  straight: `(c_src · a_src + c_dst · a_dst · (1 − a_src)) / a_out`, so a burn-in over a
+  transparent background keeps its own colour; over a premultiplied still it is
+  `c_src · a_src + c_dst · (1 − a_src)`. 4:2:2 chroma is blended once per pixel pair.
 - Video items and patterns have no key in v1; the key flow then carries full key
-  (opaque) or no key (transparent), configurable (default opaque).
+  (opaque) or no key (transparent), configurable (default opaque). Since 1.3.0 the
+  `v210a` alpha plane follows the same setting (it was always 0).
 
 ---
 

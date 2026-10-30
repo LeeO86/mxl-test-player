@@ -277,5 +277,5 @@ export function newTextLayer() {
   };
 }
 export function newBox() {
-  return { enabled: true, content: "builtin", path: "bounce", speed: 0.15, size: 0.12, opacity: 1, color: "#FFCC00", include_in_key: false, start_x: 0, start_y: 0 };
+  return { enabled: true, content: "builtin", path: "bounce", speed: 0.15, size: 0.12, opacity: 1, color: "#FFCC00", start_x: 0, start_y: 0 };
 }

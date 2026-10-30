@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.0 (unreleased)
+
+### Fixes
+
+- **Burn-ins go into the key.** On a `v210a` output the alpha plane was never drawn on, so every burn-in (moving box, sprite, text, the standard burn-ins) was in the fill but vanished in a downstream keyer; on a `fill_key` output only a moving box with "include in key" went into the key, text never. Now every burn-in drawn on the fill is also drawn into the alpha (the `v210a` alpha plane, or the `fill_key` key at `key_min`..`key_max`) with its own opacity, composited "over": `a_out = a_src + a_dst · (1 − a_src)`. The fill stays straight alpha (`(c_src · a_src + c_dst · a_dst · (1 − a_src)) / a_out`), so a burn-in over a transparent background has its own colour, not a darkened one; over a still converted as `premultiplied` the fill is blended premultiplied. Outputs without a key (`key_mode` `off`) are drawn exactly as before.
+- **The moving box's `include_in_key` is gone** (API, state file, web UI checkbox "In the key"): every box is in the key now. The field is still accepted and ignored, so saved states and older clients keep working.
+- **The `v210a` alpha plane of patterns, videos and black follows `idle_key`** (default `opaque`: 1023), as the `fill_key` key always did. It was 0 (transparent) whatever `idle_key` said.
+- New unit tests: the over-composite of alpha and straight fill against the formula (transparent, half and opaque background), the key range of `fill_key`, the premultiplied blend, nothing outside the layer, restoring the alpha plane under the overlay, and a text layer and a moving box writing their opacity into a `v210a` plane.
+- New integration test `tests/integration/keying.py` (also in CI): reads the MXL grains back with the new lab tool `build/player_grain_dump` and checks the alpha (`v210a`) and the key (`fill_key`) under a 60 % moving box, a 50 % text box and the transparent background; `--shots DIR` writes the fill and the key as PNG.
+
 ## 1.2.4
 
 ### Fixes

@@ -4,6 +4,7 @@
 #include "motion.hpp"
 #include "placeholders.hpp"
 #include "text.hpp"
+#include "v210.hpp"
 
 #include <map>
 #include <string>
@@ -22,6 +23,7 @@ struct OverlayFrame {
     BurnInConfig burnin;
     PlaceholderVars vars;
     bool keyed_still = false;
+    bool premultiplied = false;  // the fill under the overlay is premultiplied (a still converted so)
     std::uint64_t grain_index = 0;
     SpriteFrame sprites[2]{};  // resolved content for each box; null rgba = builtin
 };
@@ -34,10 +36,10 @@ struct DrawnRect {
 class OverlayRenderer {
 public:
     explicit OverlayRenderer(std::string font_dir);
-    // Draws onto the fill and, for layers that go into the key, the key. The areas drawn on
-    // each are appended to `fill_rects` and `key_rects` when given.
-    void apply(std::uint8_t* v210, std::uint8_t* key_v210, const OverlayFrame& frame, std::vector<DrawnRect>* fill_rects = nullptr,
-               std::vector<DrawnRect>* key_rects = nullptr);
+    // Draws onto the fill and, every layer with its own opacity, onto the fill's alpha (the v210a
+    // alpha plane or the fill_key key) when there is one. The areas drawn on are appended to
+    // `rects` when given; the alpha is drawn on in the same areas.
+    void apply(std::uint8_t* v210, const AlphaTarget& alpha, const OverlayFrame& frame, std::vector<DrawnRect>* rects = nullptr);
 
 private:
     TextRenderer text_;

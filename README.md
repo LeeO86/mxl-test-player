@@ -110,6 +110,9 @@ Widgets: operator screens can frame one output's transport. `GET /widgets` lists
 ./build/player_tests
 python3 tests/integration/lifecycle.py
 python3 tests/integration/play_loop.py
+python3 tests/integration/keying.py [--shots DIR]
 ```
+
+`keying.py` reads the MXL grains back with `build/player_grain_dump <domain> <flow id> <index|-N> <file>` (a lab tool built with the tests) and checks the alpha and key values.
 
 See `IMPLEMENTATION_PLAN.md` for the G1–G14 audit and `deploy/` for Compose, Kubernetes and Grafana.

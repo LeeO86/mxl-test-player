@@ -75,6 +75,7 @@ private:
         std::vector<std::uint8_t> still_fill;
         std::vector<std::uint8_t> still_key;
         std::vector<std::uint8_t> still_a10;
+        bool premultiplied = false;  // the still's fill is premultiplied
         std::int64_t frames = 1;
         int channels = 0;
         std::string name;
