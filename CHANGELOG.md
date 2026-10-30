@@ -2,6 +2,13 @@
 
 ## 1.3.0 (unreleased)
 
+### Breaking
+
+- **The `v210a` alpha plane of patterns, videos and black now follows `idle_key`** (default `opaque`, 1023; it was 0). An output that feeds a keyer with graphics must set `idle_key: transparent`, or the keyer sees an opaque frame under the graphics.
+- **`include_in_key` of the moving box is ignored**: every moving box (and every other burn-in) is in the key.
+
+### New
+
 - **An animated GIF or APNG plays as a clip with its alpha.** Before, an uploaded GIF was only a moving-box sprite. A `sprite` item now also plays as a source (`PUT /api/v1/outputs/{n}/source` with `{"type": "video", "item_id": …}`, then `POST …/transport`, as any clip is fired; also in playlists, and from the web UI's Source tab, Library *Play on* and Playlists): it loops at its own frame timing, mapped onto the output rate (one loop is the animation's duration rounded to whole output frames, so it loops seamlessly and seeks, pauses and steps like a video; at most half an output frame per loop off). Its alpha goes into the `v210a` alpha plane or the `fill_key` key, and burn-ins composite over it. It has no audio. A one-frame GIF plays as a still with alpha. The moving-box use is unchanged.
   - Converted once per format at upload, frame by frame (never decoded per grain): the sprite frames as before, plus a raw clip at the format (`anim-<format>.v210` and `.a10` in the item's directory, about 8 MB per GIF frame at 1080 lines). Played from RAM, one copy per output (`mxl_test_player_ram_clip_bytes` counts it). A sprite uploaded before 1.3.0 is converted once more the first time it is played.
   - Bounded: frames are counted from the packets before anything is decoded. More than 1000 frames, or an image larger than 8192×8192, fails the conversion with that reason; a clip that does not fit `PLAYER_RAM_BUDGET_MB` (frames × fill and alpha at the format) is skipped with `clip: false` and a `clip_error`, and the item stays usable as a sprite. One frame is held at a time while converting.
