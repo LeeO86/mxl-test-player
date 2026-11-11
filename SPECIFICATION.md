@@ -6,7 +6,7 @@ Changelog: v0.3 — live custom text burn-ins (§5.5) and a moving box with buil
 Repository: `LeeO86/mxl-test-player` (name can still change)
 Aligns with: `LeeO86/mxl-decklink`, `LeeO86/mxl-st2110-gateway`, `LeeO86/mxl-fabrics-agent`,
 `LeeO86/mxl-multiviewer`, `LeeO86/mxl-webrtc-monitor`, `LeeO86/mxl-srt-gateway`,
-platform repo `mmz-srf/mxl-poc-platform`. Functional inspiration: the CBC
+the (private) platform repository. Functional inspiration: the CBC
 `test-generator` and `file-player` from `cbcrc/mxl-hands-on`.
 
 The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY are used as in RFC 2119.

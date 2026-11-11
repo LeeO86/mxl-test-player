@@ -4,6 +4,8 @@ TAI-locked MXL test source. Each output writes a `video/v210` flow and an `audio
 
 Part of [mxl-stack](https://github.com/LeeO86/mxl-stack), a collection of open-source MXL media functions with Docker Compose and Kubernetes examples.
 
+![mxl-test-player: two outputs playing colour bars with 16 audio channels](assets/web-ui.png)
+
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
