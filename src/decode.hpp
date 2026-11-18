@@ -86,7 +86,8 @@ public:
     int channels() const { return channels_; }
     int width() const { return width_; }
     int height() const { return height_; }
-    // Copies one full frame of v210 and `audio_count` interleaved samples starting at `audio_start`.
+    // Writes one full frame of v210 and `audio_count` interleaved samples starting at `audio_start`
+    // (on failure `v210` may be partly written).
     bool read(std::int64_t frame, std::uint8_t* v210, float* audio, std::uint64_t audio_start, int audio_count, std::string& error);
 
 private:

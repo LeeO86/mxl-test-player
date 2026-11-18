@@ -68,10 +68,10 @@ void blit_rgba(std::uint8_t* dst, int dw, int dh, const std::uint8_t* src, int s
     }
 }
 
-bool frame_to_v210(const AVFrame* frame, std::vector<std::uint8_t>& v210, std::string& error) {
+// Packs `frame` into `v210` (v210_size(width, height) bytes).
+bool frame_to_v210(const AVFrame* frame, std::uint8_t* v210, std::string& error) {
     const int w = frame->width;
     const int h = frame->height;
-    v210.resize(v210_size(w, h));
     if (frame->format == AV_PIX_FMT_YUV422P10LE) {
         std::vector<std::uint16_t> y(static_cast<std::size_t>(w));
         std::vector<std::uint16_t> cb(static_cast<std::size_t>(w / 2));
@@ -89,7 +89,7 @@ bool frame_to_v210(const AVFrame* frame, std::vector<std::uint8_t>& v210, std::s
                 cb[x] = us[x] & 0x3FF;
                 cr[x] = vs[x] & 0x3FF;
             }
-            pack_v210_line(y.data(), cb.data(), cr.data(), w, v210.data() + static_cast<std::size_t>(row) * stride);
+            pack_v210_line(y.data(), cb.data(), cr.data(), w, v210 + static_cast<std::size_t>(row) * stride);
         }
         return true;
     }
@@ -104,8 +104,13 @@ bool frame_to_v210(const AVFrame* frame, std::vector<std::uint8_t>& v210, std::s
     int dst_lines[4] = {w * 4, 0, 0, 0};
     sws_scale(sws, frame->data, frame->linesize, 0, h, dst_data, dst_lines);
     sws_freeContext(sws);
-    rgba_to_fill_key(rgba.data(), w, h, false, v210.data(), nullptr, nullptr, kYBlack, kYWhite);
+    rgba_to_fill_key(rgba.data(), w, h, false, v210, nullptr, nullptr, kYBlack, kYWhite);
     return true;
+}
+
+bool frame_to_v210(const AVFrame* frame, std::vector<std::uint8_t>& v210, std::string& error) {
+    v210.resize(v210_size(frame->width, frame->height));
+    return frame_to_v210(frame, v210.data(), error);
 }
 
 }  // namespace
@@ -583,14 +588,18 @@ bool MezzanineReader::read(std::int64_t frame_index, std::uint8_t* v210, float* 
     AVPacket* pkt = av_packet_alloc();
     AVFrame* frame = av_frame_alloc();
     bool got = false;
-    std::vector<std::uint8_t> one;
     auto decode_video = [&](AVPacket* p) {
         avcodec_send_packet(impl_->vdec, p);
         while (avcodec_receive_frame(impl_->vdec, frame) == 0) {
             std::int64_t idx = impl_->next_frame < 0 ? frame_index : impl_->next_frame;
             if (frame->pts != AV_NOPTS_VALUE) idx = av_rescale_q(frame->pts, vs->time_base, av_inv_q(impl_->rate));
             if (!got && idx >= frame_index) {
-                got = frame_to_v210(frame, one, error);
+                // Packed straight into the caller's buffer: no copy of the frame.
+                if (frame->width != impl_->width || frame->height != impl_->height) {
+                    error = "frame size differs from the mezzanine's";
+                } else {
+                    got = frame_to_v210(frame, v210, error);
+                }
                 impl_->next_frame = idx + 1;
             }
             av_frame_unref(frame);
@@ -633,15 +642,10 @@ bool MezzanineReader::read(std::int64_t frame_index, std::uint8_t* v210, float* 
     }
     av_frame_free(&frame);
     av_packet_free(&pkt);
-    if (!got || one.empty()) {
+    if (!got) {
         if (error.empty()) error = "frame not available";
         return false;
     }
-    if (one.size() != v210_size(impl_->width, impl_->height)) {
-        error = "frame size differs from the mezzanine's";
-        return false;
-    }
-    std::memcpy(v210, one.data(), one.size());
     if (audio && audio_count > 0) {
         std::fill(audio, audio + static_cast<std::size_t>(audio_count) * ch, 0.f);
         // The samples of [audio_start, audio_end) the buffer holds (silence where it has none,

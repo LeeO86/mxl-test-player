@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.3 (unreleased)
+
+### Changes
+
+- **Streaming uses less CPU.** A streamed frame was copied and zero-filled several times on its way to the output (5.5 MB each at 1080p). Now the decoder packs it straight into a reused buffer, and the frame on air is kept without a copy.
+- **New metric `stream_missed_total`** (and `stream_missed` in the output's status): grains of a streamed video whose frame was not decoded in time, so the last frame was repeated (or black before the first one). It also counts the first grains after a start or a seek. Before, such repeats were not counted anywhere; `underruns_total` counts only grains the output itself wrote late.
+- **Correction to 1.3.2:** a streamed 1080p50 ProRes HQ clip costs about 1 core only for easy content. A detailed clip costs up to about 2.5 cores per output, and the decoder needs free cores, not only CPU quota: on a busy host it runs at real time and builds no preroll.
+
 ## 1.3.2 (2026-11-18)
 
 ### Fixes

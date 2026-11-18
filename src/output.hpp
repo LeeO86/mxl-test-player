@@ -64,6 +64,7 @@ public:
     std::uint64_t underruns() const { return underruns_.load(); }
     std::uint64_t loops_done() const { return loops_.load(); }
     int ahead() const { return ahead_.load(); }
+    std::uint64_t stream_missed() const { return stream_missed_.load(); }
     std::uint64_t ram_bytes() const { return ram_bytes_.load(); }
 
     std::function<void()> on_change;
@@ -111,6 +112,7 @@ private:
     };
     void stream_main();
     const StreamFrame* stream_take(const std::shared_ptr<const Media>& media, std::int64_t frame);
+    void stream_drop(std::size_t count);
     struct FlowDefs {
         std::string video, audio, data, key;  // empty when the flow is off
     };
@@ -157,6 +159,7 @@ private:
     std::atomic<std::uint64_t> underruns_{0};
     std::atomic<std::uint64_t> loops_{0};
     std::atomic<int> ahead_{0};
+    std::atomic<std::uint64_t> stream_missed_{0};  // grains of a streamed video whose frame was not decoded in time
     std::atomic<std::uint64_t> ram_bytes_{0};
     // Written by the writer each grain: the playhead (what pause holds), and the frame within the
     // current item and the item's length (for the status).
@@ -173,7 +176,9 @@ private:
     std::int64_t stream_want_ = 0;               // the frame the writer showed last
     std::uint64_t stream_gen_ = 0;               // counts restarts of the window (a seek, new media)
     std::deque<StreamFrame> stream_;
-    StreamFrame stream_shown_;                   // the writer's copy of the frame it shows
+    std::int64_t stream_last_ = -1;              // the frame stream_take returned last (still in `stream_`)
+    StreamFrame stream_shown_;                   // that frame once it left `stream_` (writer thread only)
+    std::vector<std::vector<std::uint8_t>> stream_pool_;  // frame buffers to reuse
 
     MxlFlow video_, audio_, data_, key_;
     bool flows_open_ = false;
