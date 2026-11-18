@@ -502,6 +502,7 @@ Configuration (env > file > default; invalid exits 78):
 | `PLAYER_LIBRARY_DIR` | `/data/library` |
 | `PLAYER_IMPORT_DIR` | empty |
 | `PLAYER_CONVERT_CONCURRENCY` | 1 |
+| `PLAYER_CONVERT_THREADS` | 2 (1.3.2; ffmpeg runs at nice 10) |
 | `PLAYER_RAM_CLIP_MAX_S` / `PLAYER_RAM_BUDGET_MB` | 20 / 4096 |
 | `PLAYER_PREROLL_FRAMES` | 25 |
 | `CONFIG_DIR` | `/config` (state, presets and playlists live here) |

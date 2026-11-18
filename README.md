@@ -40,9 +40,10 @@ Precedence is environment, then the JSON file (`--config`, else `PLAYER_CONFIG`,
 | `PLAYER_LIBRARY_DIR` | `/data/library` | Mezzanine library; one player per directory (Kubernetes: `strategy: Recreate`). Items missing from its `index.json` are restored from their `item.json` at start |
 | `PLAYER_IMPORT_DIR` | empty | Watched import directory |
 | `PLAYER_CONVERT_CONCURRENCY` | `1` | ffmpeg jobs at once |
+| `PLAYER_CONVERT_THREADS` | `2` | CPU threads per conversion. Conversions run at a lower priority (nice 10) than playout; keep threads plus one core per streaming output within the CPU limit |
 | `PLAYER_RAM_CLIP_MAX_S` | `20` | Longest clip kept in RAM |
 | `PLAYER_RAM_BUDGET_MB` | `4096` | One RAM budget for the whole process: every output's clips in RAM (videos up to `PLAYER_RAM_CLIP_MAX_S`, GIF and APNG clips; shared between outputs that play the same clip). Also bounds an animation's conversion |
-| `PLAYER_PREROLL_FRAMES` | `25` | Frames prepared before play |
+| `PLAYER_PREROLL_FRAMES` | `25` | Frames decoded ahead when a video streams from its mezzanine (longer than `PLAYER_RAM_CLIP_MAX_S` or over the RAM budget) |
 | `PLAYER_FONT_DIR` | bundled | Font directory |
 | `PLAYER_WEB_ROOT` | bundled | Built web UI |
 | `PLAYER_UPLOAD_LIMIT_GB` | `20` | Upload limit |

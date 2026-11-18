@@ -167,7 +167,7 @@ nlohmann::json source_to_json(const SourceDesc& s) {
 }
 
 Output::Output(int index, OutputConfig cfg, VideoFormat platform, MxlSession& mxl, Library& library, Uuid node, std::string font_dir,
-               double ram_max_s)
+               double ram_max_s, int preroll_frames)
     : index_(index),
       mxl_(mxl),
       library_(library),
@@ -175,6 +175,7 @@ Output::Output(int index, OutputConfig cfg, VideoFormat platform, MxlSession& mx
       font_dir_(std::move(font_dir)),
       platform_(std::move(platform)),
       ram_max_s_(ram_max_s),
+      preroll_frames_(preroll_frames),
       cfg_(std::move(cfg)) {
     fmt_ = cfg_.format.empty() ? platform_ : *parse_format(cfg_.format);
     ids_ = derive_output_ids(node_, index_, fmt_, cfg_.audio_channels, cfg_.key_mode == KeyMode::V210a);
@@ -188,12 +189,15 @@ Output::~Output() { join(); }
 void Output::start() {
     stop_ = false;
     loader_ = std::thread([this] { loader_main(); });
+    streamer_ = std::thread([this] { stream_main(); });
     thread_ = std::thread([this] { writer_main(); });
 }
 
 void Output::join() {
     stop_ = true;
+    stream_cv_.notify_all();
     if (loader_.joinable()) loader_.join();
+    if (streamer_.joinable()) streamer_.join();
     if (thread_.joinable()) thread_.join();
 }
 
@@ -321,6 +325,7 @@ Output::Media Output::load_media(const SourceDesc& src, const VideoFormat& fmt) 
     }
     media.ready = fs::exists(mezz);
     media.ram = false;
+    media.mezz = mezz.string();
     return media;
 }
 
@@ -484,6 +489,114 @@ void Output::reopen(const OutputConfig& cfg, const VideoFormat& fmt) {
     }
 }
 
+// The writer's side of the decode-ahead: frame `frame` of `media`, or null while it is not decoded
+// yet. Frames before it are dropped; a frame the window does not hold restarts it there (a seek, a
+// new item). The pointer stays valid until the next call (the stream thread only appends).
+const Output::StreamFrame* Output::stream_take(const std::shared_ptr<const Media>& media, std::int64_t frame) {
+    std::lock_guard lock(stream_mu_);
+    if (stream_media_ != media) {
+        stream_media_ = media;
+        stream_.clear();
+        stream_shown_ = StreamFrame{};
+        ++stream_gen_;
+    }
+    if (!media) return nullptr;
+    stream_want_ = frame;
+    const auto it = std::find_if(stream_.begin(), stream_.end(), [&](const StreamFrame& f) { return f.frame == frame; });
+    const StreamFrame* found = nullptr;
+    if (it != stream_.end()) {
+        stream_.erase(stream_.begin(), it);
+        found = &stream_.front();
+    } else if (!stream_.empty()) {
+        stream_.clear();
+        ++stream_gen_;
+    }
+    stream_cv_.notify_one();
+    return found;
+}
+
+// Decodes the streaming media's frames from the writer's frame on, up to PLAYER_PREROLL_FRAMES
+// ahead (at least 2), in play order (after the last frame the first when the output loops).
+void Output::stream_main() {
+    MezzanineReader reader;
+    std::string open_path;
+    std::string last_error;
+    StreamFrame next;
+    while (!stop_) {
+        bool loop = true;
+        VideoFormat fmt;
+        {
+            std::lock_guard lock(mu_);
+            loop = loop_;
+            fmt = fmt_;
+        }
+        std::shared_ptr<const Media> media;
+        std::int64_t k = 0;
+        std::uint64_t gen = 0;
+        {
+            std::unique_lock lock(stream_mu_);
+            ahead_ = static_cast<int>(stream_.size());
+            const auto cap = static_cast<std::size_t>(std::max(2, preroll_frames_));
+            if (stream_media_ && !stream_media_->mezz.empty() && stream_.size() < cap) {
+                media = stream_media_;
+                gen = stream_gen_;
+                // An empty window starts one frame after the writer's (it shows that one by
+                // the time the frame is decoded); a paused writer keeps asking for its frame.
+                k = stream_.empty() ? stream_want_ : stream_.back().frame + 1;
+                if (stream_.empty() && k > 0) ++k;
+            } else {
+                stream_cv_.wait_for(lock, std::chrono::milliseconds(5));
+            }
+        }
+        if (!media) {
+            if (!open_path.empty() && !stream_media_) {
+                reader.close();
+                open_path.clear();
+            }
+            continue;
+        }
+        if (k >= media->frames) {
+            if (!loop) {
+                std::unique_lock lock(stream_mu_);
+                stream_cv_.wait_for(lock, std::chrono::milliseconds(5));
+                continue;
+            }
+            k %= media->frames;
+        }
+        std::string err;
+        if (open_path != media->mezz) {
+            open_path.clear();
+            if (!reader.open(media->mezz, err) || reader.width() != fmt.width || reader.height() != fmt.height) {
+                if (err.empty()) err = "mezzanine size differs from the output format";
+                if (err != last_error) log_error("output " + std::to_string(index_) + ": stream: " + err);
+                last_error = err;
+                reader.close();
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                continue;
+            }
+            open_path = media->mezz;
+        }
+        const std::uint64_t a0 = samples_until_grain(static_cast<std::uint64_t>(k), fmt.frame_rate);
+        const int count = static_cast<int>(samples_in_grain(static_cast<std::uint64_t>(k), fmt.frame_rate));
+        next.frame = k;
+        next.channels = reader.channels();
+        next.v210.resize(v210_size(fmt.width, fmt.height));
+        next.audio.assign(static_cast<std::size_t>(count) * static_cast<std::size_t>(std::max(0, next.channels)), 0.f);
+        if (!reader.read(k, next.v210.data(), next.channels > 0 ? next.audio.data() : nullptr, a0, count, err)) {
+            if (err != last_error) log_error("output " + std::to_string(index_) + ": stream frame " + std::to_string(k) + ": " + err);
+            last_error = err;
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            continue;
+        }
+        last_error.clear();
+        std::lock_guard lock(stream_mu_);
+        if (gen == stream_gen_ && media == stream_media_) {
+            stream_.push_back(std::move(next));
+            next = StreamFrame{};
+        }
+    }
+}
+
 void Output::writer_main() {
     OverlayRenderer overlay(font_dir_);
     std::uint64_t last_index = 0;
@@ -526,6 +639,7 @@ void Output::writer_main() {
     std::unordered_map<const std::uint8_t*, SlotState> fill_slots;
     std::unordered_map<const std::uint8_t*, SlotState> key_slots;
     std::vector<DrawnRect> drawn;
+    bool stream_held = false;
     while (!stop_) {
         OutputConfig cfg;
         SourceDesc src;
@@ -560,6 +674,10 @@ void Output::writer_main() {
         }
         auto media = published_.load();
         if (!media) media = std::make_shared<const Media>();
+        // A video that streams from its mezzanine; else the stream thread lets go of the old one.
+        const bool streaming = !media->mezz.empty() && media->ready && media->frames > 0 && !media->anim;
+        if (!streaming && stream_held) stream_take(nullptr, 0);
+        stream_held = streaming;
         const Rational gr = fmt.grain_rate();
         mxlRational rr{gr.num, gr.den};
         const std::uint64_t now = mxlGetCurrentIndex(&rr);
@@ -573,6 +691,7 @@ void Output::writer_main() {
         const bool inter = fmt.interlaced();
         const std::uint64_t abs_frame = inter ? idx / 2 : idx;
         std::int64_t media_frame = 0;
+        const StreamFrame* streamed = nullptr;  // this grain's frame from the decode-ahead
         // field: the grain's field in time (0 first, 1 second); lines: the frame lines it carries
         // (0 top/even, 1 bottom/odd). bff writes the bottom field first.
         int field = inter ? static_cast<int>(idx & 1u) : -1;
@@ -790,6 +909,23 @@ void Output::writer_main() {
             if (off + full_bytes <= media->clip.v210.size()) std::memcpy(fill, media->clip.v210.data() + off, full_bytes);
             else fill_src = black_frame(fmt.width, fmt.height);
             item_name = media->name;
+        } else if (streaming) {
+            // Streams from the mezzanine: the decoded frame, else (decode behind) the last one shown.
+            streamed = stream_take(media, std::clamp<std::int64_t>(media_frame, 0, media->frames - 1));
+            if (streamed && streamed->v210.size() == full_bytes) {
+                if (stream_shown_.frame != streamed->frame || stream_shown_.v210.size() != full_bytes) {
+                    stream_shown_.frame = streamed->frame;
+                    stream_shown_.v210 = streamed->v210;
+                }
+                std::memcpy(fill, streamed->v210.data(), full_bytes);
+            } else if (stream_shown_.v210.size() == full_bytes) {
+                streamed = nullptr;
+                std::memcpy(fill, stream_shown_.v210.data(), full_bytes);
+            } else {
+                streamed = nullptr;
+                fill_src = black_frame(fmt.width, fmt.height);
+            }
+            item_name = media->name;
         } else {
             fill_src = black_frame(fmt.width, fmt.height);
         }
@@ -943,6 +1079,17 @@ void Output::writer_main() {
                     float v = 0;
                     if (c < sch) v = media->clip.audio[s * static_cast<std::uint64_t>(sch) + c];
                     planar[static_cast<std::size_t>(c) * count + i] = v;
+                }
+            }
+        } else if (!silence && streamed && streamed->channels > 0) {
+            // The streamed frame's samples (the second field takes the frame's second part).
+            std::uint32_t offset = 0;
+            if (field == 1) offset = samples_in_grain(abs_frame * 2, gr);
+            const int sch = streamed->channels;
+            const auto have = static_cast<std::uint32_t>(streamed->audio.size() / static_cast<std::size_t>(sch));
+            for (std::uint32_t i = 0; i < count && offset + i < have; ++i) {
+                for (int c = 0; c < channels && c < sch; ++c) {
+                    planar[static_cast<std::size_t>(c) * count + i] = streamed->audio[static_cast<std::size_t>(offset + i) * static_cast<std::size_t>(sch) + c];
                 }
             }
         } else if (!silence && src.type == "still") {

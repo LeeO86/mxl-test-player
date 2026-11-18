@@ -167,6 +167,7 @@ void validate(Config& c) {
     if (c.outputs < 1 || c.outputs > 16) throw ConfigError("PLAYER_OUTPUTS must be 1..16");
     if (c.audio_channels < 2 || c.audio_channels > 64) throw ConfigError("PLAYER_AUDIO_CHANNELS must be 2..64");
     if (c.convert_concurrency < 1 || c.convert_concurrency > 8) throw ConfigError("PLAYER_CONVERT_CONCURRENCY must be 1..8");
+    if (c.convert_threads < 1 || c.convert_threads > 64) throw ConfigError("PLAYER_CONVERT_THREADS must be 1..64");
     if (c.ram_clip_max_s < 0 || c.ram_clip_max_s > 600) throw ConfigError("PLAYER_RAM_CLIP_MAX_S out of range");
     if (c.ram_budget_mb < 64) throw ConfigError("PLAYER_RAM_BUDGET_MB too small");
     if (c.preroll_frames < 1 || c.preroll_frames > 250) throw ConfigError("PLAYER_PREROLL_FRAMES out of range");
@@ -414,6 +415,7 @@ Config load_config(const std::string& file_path, const char* const* envp) {
     c.library_dir = pick_str("PLAYER_LIBRARY_DIR", "library_dir", "/data/library");
     c.import_dir = pick_str("PLAYER_IMPORT_DIR", "import_dir", "");
     c.convert_concurrency = pick_int("PLAYER_CONVERT_CONCURRENCY", "convert_concurrency", 1);
+    c.convert_threads = pick_int("PLAYER_CONVERT_THREADS", "convert_threads", 2);
     c.ram_clip_max_s = pick_dbl("PLAYER_RAM_CLIP_MAX_S", "ram_clip_max_s", 20);
     c.ram_budget_mb = pick_int("PLAYER_RAM_BUDGET_MB", "ram_budget_mb", 4096);
     c.preroll_frames = pick_int("PLAYER_PREROLL_FRAMES", "preroll_frames", 25);
@@ -515,6 +517,7 @@ Config load_config(const std::string& file_path, const char* const* envp) {
         {"PLAYER_LIBRARY_DIR", c.library_dir},
         {"PLAYER_IMPORT_DIR", c.import_dir},
         {"PLAYER_CONVERT_CONCURRENCY", std::to_string(c.convert_concurrency)},
+        {"PLAYER_CONVERT_THREADS", std::to_string(c.convert_threads)},
         {"PLAYER_RAM_CLIP_MAX_S", num(c.ram_clip_max_s)},
         {"PLAYER_RAM_BUDGET_MB", std::to_string(c.ram_budget_mb)},
         {"PLAYER_PREROLL_FRAMES", std::to_string(c.preroll_frames)},

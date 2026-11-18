@@ -4,6 +4,7 @@
 
 #include <fcntl.h>
 #include <poll.h>
+#include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -56,6 +57,8 @@ ProcessResult run_process(const std::vector<std::string>& args, const std::funct
         argv.reserve(args.size() + 1);
         for (const auto& a : args) argv.push_back(const_cast<char*>(a.c_str()));
         argv.push_back(nullptr);
+        // Below the outputs: a conversion (ffmpeg) yields the CPU to the real-time writers.
+        setpriority(PRIO_PROCESS, 0, 10);
         execvp(argv[0], argv.data());
         _exit(127);
     }

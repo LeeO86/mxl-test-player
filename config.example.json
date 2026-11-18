@@ -4,6 +4,7 @@
   "audio_channels": 16,
   "library_dir": "/data/library",
   "convert_concurrency": 1,
+  "convert_threads": 2,
   "ram_clip_max_s": 20,
   "ram_budget_mb": 4096,
   "preroll_frames": 25,
