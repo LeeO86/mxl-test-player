@@ -99,6 +99,7 @@ struct Config {
     std::string library_dir = "/data/library";
     std::string import_dir;
     int convert_concurrency = 1;
+    int convert_threads = 2;
     double ram_clip_max_s = 20;
     int ram_budget_mb = 4096;
     int preroll_frames = 25;

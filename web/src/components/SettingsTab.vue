@@ -29,6 +29,7 @@ const DESCRIPTIONS = {
   PLAYER_LIBRARY_DIR: "Media library (mezzanines, stills, sprites).",
   PLAYER_IMPORT_DIR: "Watched import directory (empty: off).",
   PLAYER_CONVERT_CONCURRENCY: "Conversions at once.",
+  PLAYER_CONVERT_THREADS: "CPU threads per conversion (runs below playout priority).",
   PLAYER_RAM_CLIP_MAX_S: "Longest clip kept in RAM.",
   PLAYER_RAM_BUDGET_MB: "RAM budget for clips.",
   PLAYER_PREROLL_FRAMES: "Frames prepared before play.",

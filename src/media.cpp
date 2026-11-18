@@ -770,8 +770,11 @@ bool Library::convert_one(LibraryItem& item, const VideoFormat& format, ConvertJ
         vf += "format=yuv422p10le";
         const auto video_only = dir / "video-tmp.mov";
         const auto mezz = dir / ("mezz-" + format.name + ".mov");
-        auto pr = run_process({"ffmpeg", "-hide_banner", "-y", "-i", original.string(), "-an", "-vf", vf, "-c:v", "prores_ks", "-profile:v",
-                               "3", "-pix_fmt", "yuv422p10le", video_only.string()},
+        // PLAYER_CONVERT_THREADS for the decoder, the filters and the encoder: an ffmpeg with a
+        // thread per host core used the pod's whole CPU limit, and the outputs underran.
+        const std::string threads = std::to_string(cfg_.convert_threads);
+        auto pr = run_process({"ffmpeg", "-hide_banner", "-y", "-threads", threads, "-i", original.string(), "-an", "-vf", vf, "-filter_threads",
+                               threads, "-c:v", "prores_ks", "-profile:v", "3", "-pix_fmt", "yuv422p10le", "-threads", threads, video_only.string()},
                               [&](std::string_view line) {
                                   auto s = std::string(line);
                                   if (s.rfind("out_time_ms=", 0) == 0) {
