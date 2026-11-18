@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.2 (unreleased)
+
+### Fixes
+
+- **A video that streams from its mezzanine plays its picture and sound again.** A video longer than `PLAYER_RAM_CLIP_MAX_S` (20 s), or one that does not fit `PLAYER_RAM_BUDGET_MB` (at 1080p50 the default 4096 MB holds about 15 s), is not read into RAM but streams from its mezzanine. That path was never connected to the output: such a video played as black with silence (only the burn-ins), while its position advanced and `decode_ahead` stayed 0. Now a decode thread per output reads the frames from the playhead on, `PLAYER_PREROLL_FRAMES` (25) ahead, with their audio; loop, pause, seek and playlists work as with a clip in RAM. If the decode falls behind, the last frame stays on air. In the lab a 1080p50 ProRes mezzanine costs about one core per output that streams; 0 underruns over loops, pause and seek.
 ## 1.3.1 (2026-10-30)
 
 ### Fixes

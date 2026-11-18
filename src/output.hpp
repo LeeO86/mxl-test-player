@@ -8,6 +8,8 @@
 #include "playlist.hpp"
 
 #include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <filesystem>
 #include <cstdint>
 #include <functional>
@@ -36,7 +38,7 @@ struct SourceDesc {
 class Output {
 public:
     Output(int index, OutputConfig cfg, VideoFormat platform, MxlSession& mxl, Library& library, Uuid node, std::string font_dir,
-           double ram_max_s);
+           double ram_max_s, int preroll_frames = 25);
     ~Output();
     void start();
     void join();
@@ -74,6 +76,7 @@ private:
         std::string item_id;
         std::string format;
         RamClip clip;
+        std::string mezz;  // a video that streams from its mezzanine (not in RAM): its path
         std::shared_ptr<void> ram_hold;  // the clip's share of the process-wide RAM budget
         std::vector<std::uint8_t> still_fill;
         std::vector<std::uint8_t> still_key;
@@ -98,6 +101,16 @@ private:
 
     void writer_main();
     void loader_main();
+    // Decode-ahead for a video that streams from its mezzanine (§7): the stream thread decodes the
+    // frames from the writer's playhead on into `stream_`; the writer takes the frame it shows.
+    struct StreamFrame {
+        std::int64_t frame = 0;
+        std::vector<std::uint8_t> v210;
+        std::vector<float> audio;  // the frame's samples, interleaved, `channels` per sample
+        int channels = 0;
+    };
+    void stream_main();
+    const StreamFrame* stream_take(const std::shared_ptr<const Media>& media, std::int64_t frame);
     struct FlowDefs {
         std::string video, audio, data, key;  // empty when the flow is off
     };
@@ -114,6 +127,7 @@ private:
     std::string font_dir_;
     VideoFormat platform_;
     double ram_max_s_ = 20;
+    int preroll_frames_ = 25;
 
     mutable std::mutex mu_;
     OutputConfig cfg_;
@@ -151,6 +165,15 @@ private:
     std::atomic<std::int64_t> length_{0};
     std::thread thread_;
     std::thread loader_;
+    std::thread streamer_;
+
+    std::mutex stream_mu_;
+    std::condition_variable stream_cv_;
+    std::shared_ptr<const Media> stream_media_;  // the streaming media the writer plays
+    std::int64_t stream_want_ = 0;               // the frame the writer showed last
+    std::uint64_t stream_gen_ = 0;               // counts restarts of the window (a seek, new media)
+    std::deque<StreamFrame> stream_;
+    StreamFrame stream_shown_;                   // the writer's copy of the frame it shows
 
     MxlFlow video_, audio_, data_, key_;
     bool flows_open_ = false;

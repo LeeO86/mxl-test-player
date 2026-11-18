@@ -16,6 +16,7 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <deque>
 #include <cstring>
 
 namespace mtp {
@@ -367,7 +368,11 @@ struct MezzanineReader::Impl {
     int vindex = -1;
     int aindex = -1;
     std::int64_t next_frame = 0;
+    // Video packets read while looking for a frame's audio; decoded by the next read.
+    std::deque<AVPacket*> pending;
+    // Decoded audio, interleaved, from sample `audio_pos` on (-1: not known yet, after a seek).
     std::vector<float> audio;
+    std::int64_t audio_pos = -1;
     int channels = 0;
     int width = 0;
     int height = 0;
@@ -380,6 +385,7 @@ MezzanineReader::~MezzanineReader() { close(); }
 
 void MezzanineReader::close() {
     if (!impl_) return;
+    for (auto* p : impl_->pending) av_packet_free(&p);
     if (impl_->swr) swr_free(&impl_->swr);
     if (impl_->vdec) avcodec_free_context(&impl_->vdec);
     if (impl_->adec) avcodec_free_context(&impl_->adec);
@@ -408,6 +414,9 @@ bool MezzanineReader::open(const std::string& path, std::string& error) {
     const AVCodec* vc = avcodec_find_decoder(vs->codecpar->codec_id);
     impl_->vdec = avcodec_alloc_context3(vc);
     avcodec_parameters_to_context(impl_->vdec, vs->codecpar);
+    // Slice threads: a 1080p ProRes frame in a few ms, and no frame of delay.
+    impl_->vdec->thread_count = 0;
+    impl_->vdec->thread_type = FF_THREAD_SLICE;
     if (avcodec_open2(impl_->vdec, vc, nullptr) < 0) {
         error = "video decoder failed";
         close();
@@ -551,67 +560,105 @@ bool MezzanineReader::read(std::int64_t frame_index, std::uint8_t* v210, float* 
         error = "reader closed";
         return false;
     }
-    // Streaming reads decode forward. A backwards seek reopens by flushing and seeking.
+    AVStream* vs = impl_->fmt->streams[impl_->vindex];
+    // Streaming reads decode forward. Another frame seeks (every mezzanine frame is a key frame).
     if (frame_index != impl_->next_frame) {
-        const int64_t ts = av_rescale_q(frame_index, av_inv_q(impl_->rate), impl_->fmt->streams[impl_->vindex]->time_base);
+        const int64_t ts = av_rescale_q(frame_index, av_inv_q(impl_->rate), vs->time_base);
         av_seek_frame(impl_->fmt, impl_->vindex, ts, AVSEEK_FLAG_BACKWARD);
         avcodec_flush_buffers(impl_->vdec);
         if (impl_->adec) avcodec_flush_buffers(impl_->adec);
+        for (auto* p : impl_->pending) av_packet_free(&p);
+        impl_->pending.clear();
         impl_->next_frame = -1;
         impl_->audio.clear();
+        impl_->audio_pos = -1;
     }
+    const bool want_audio = audio && audio_count > 0 && impl_->adec && impl_->channels > 0;
+    const auto ch = static_cast<std::size_t>(std::max(1, impl_->channels));
+    const std::int64_t audio_end = static_cast<std::int64_t>(audio_start) + audio_count;
+    auto audio_ready = [&] {
+        return !want_audio ||
+               (impl_->audio_pos >= 0 && impl_->audio_pos + static_cast<std::int64_t>(impl_->audio.size() / ch) >= audio_end);
+    };
     AVPacket* pkt = av_packet_alloc();
     AVFrame* frame = av_frame_alloc();
     bool got = false;
     std::vector<std::uint8_t> one;
-    while (!got && av_read_frame(impl_->fmt, pkt) >= 0) {
+    auto decode_video = [&](AVPacket* p) {
+        avcodec_send_packet(impl_->vdec, p);
+        while (avcodec_receive_frame(impl_->vdec, frame) == 0) {
+            std::int64_t idx = impl_->next_frame < 0 ? frame_index : impl_->next_frame;
+            if (frame->pts != AV_NOPTS_VALUE) idx = av_rescale_q(frame->pts, vs->time_base, av_inv_q(impl_->rate));
+            if (!got && idx >= frame_index) {
+                got = frame_to_v210(frame, one, error);
+                impl_->next_frame = idx + 1;
+            }
+            av_frame_unref(frame);
+        }
+    };
+    auto decode_audio = [&](AVPacket* p) {
+        avcodec_send_packet(impl_->adec, p);
+        while (avcodec_receive_frame(impl_->adec, frame) == 0) {
+            if (impl_->audio_pos < 0 && frame->pts != AV_NOPTS_VALUE) {
+                impl_->audio_pos = av_rescale_q(frame->pts, impl_->fmt->streams[impl_->aindex]->time_base, AVRational{1, 48000});
+            }
+            const int dst_nb = swr_get_out_samples(impl_->swr, frame->nb_samples) + 32;
+            std::vector<float> tmp(static_cast<std::size_t>(dst_nb) * ch);
+            uint8_t* planes[1] = {reinterpret_cast<uint8_t*>(tmp.data())};
+            const int n = swr_convert(impl_->swr, planes, dst_nb, const_cast<const uint8_t**>(frame->extended_data), frame->nb_samples);
+            if (n > 0 && impl_->audio_pos >= 0) impl_->audio.insert(impl_->audio.end(), tmp.begin(), tmp.begin() + static_cast<std::size_t>(n) * ch);
+            av_frame_unref(frame);
+        }
+    };
+    // The video packets read last time while the audio was looked for come first.
+    while (!got && !impl_->pending.empty()) {
+        AVPacket* p = impl_->pending.front();
+        impl_->pending.pop_front();
+        decode_video(p);
+        av_packet_free(&p);
+    }
+    // Then read on until the frame is decoded and its audio is there. A video packet after the
+    // frame waits in `pending`, so no frame is decoded and thrown away.
+    while (!(got && audio_ready()) && av_read_frame(impl_->fmt, pkt) >= 0) {
         if (pkt->stream_index == impl_->vindex) {
-            avcodec_send_packet(impl_->vdec, pkt);
-            while (avcodec_receive_frame(impl_->vdec, frame) == 0) {
-                std::int64_t idx = impl_->next_frame < 0 ? frame_index : impl_->next_frame;
-                if (frame->pts != AV_NOPTS_VALUE) {
-                    idx = av_rescale_q(frame->pts, impl_->fmt->streams[impl_->vindex]->time_base, av_inv_q(impl_->rate));
-                }
-                if (idx >= frame_index) {
-                    frame_to_v210(frame, one, error);
-                    got = true;
-                    impl_->next_frame = idx + 1;
-                }
-                av_frame_unref(frame);
-                if (got) break;
+            if (got) {
+                impl_->pending.push_back(av_packet_clone(pkt));
+            } else {
+                decode_video(pkt);
             }
         } else if (pkt->stream_index == impl_->aindex && impl_->adec) {
-            avcodec_send_packet(impl_->adec, pkt);
-            while (avcodec_receive_frame(impl_->adec, frame) == 0) {
-                const int dst_nb = swr_get_out_samples(impl_->swr, frame->nb_samples) + 32;
-                std::vector<float> tmp(static_cast<std::size_t>(dst_nb) * impl_->channels);
-                uint8_t* planes[1] = {reinterpret_cast<uint8_t*>(tmp.data())};
-                const int n = swr_convert(impl_->swr, planes, dst_nb, const_cast<const uint8_t**>(frame->extended_data), frame->nb_samples);
-                if (n > 0) impl_->audio.insert(impl_->audio.end(), tmp.begin(), tmp.begin() + static_cast<std::size_t>(n) * impl_->channels);
-                av_frame_unref(frame);
-            }
+            decode_audio(pkt);
         }
         av_packet_unref(pkt);
     }
     av_frame_free(&frame);
     av_packet_free(&pkt);
     if (!got || one.empty()) {
-        error = "frame not available";
+        if (error.empty()) error = "frame not available";
+        return false;
+    }
+    if (one.size() != v210_size(impl_->width, impl_->height)) {
+        error = "frame size differs from the mezzanine's";
         return false;
     }
     std::memcpy(v210, one.data(), one.size());
-    if (audio && audio_count > 0 && impl_->channels > 0) {
-        std::fill(audio, audio + static_cast<std::size_t>(audio_count) * impl_->channels, 0.f);
-        // audio buffer is a running concatenation; we don't know its absolute start after a seek.
-        // Copy what we have from the front when the caller asks for the start of this grain and
-        // the buffer is at least that long. The RAM path is preferred for gapless loops.
-        const std::uint64_t have = impl_->audio.size() / static_cast<std::size_t>(impl_->channels);
-        const std::uint64_t copy_n = std::min<std::uint64_t>(audio_count, have);
-        if (copy_n) {
-            std::memcpy(audio, impl_->audio.data(), copy_n * impl_->channels * sizeof(float));
-            impl_->audio.erase(impl_->audio.begin(), impl_->audio.begin() + static_cast<std::ptrdiff_t>(copy_n * impl_->channels));
+    if (audio && audio_count > 0) {
+        std::fill(audio, audio + static_cast<std::size_t>(audio_count) * ch, 0.f);
+        // The samples of [audio_start, audio_end) the buffer holds (silence where it has none,
+        // as after a seek into the middle of an audio chunk); then the buffer drops them.
+        if (want_audio && impl_->audio_pos >= 0) {
+            const std::int64_t have = static_cast<std::int64_t>(impl_->audio.size() / ch);
+            const std::int64_t from = std::max<std::int64_t>(impl_->audio_pos, static_cast<std::int64_t>(audio_start));
+            const std::int64_t to = std::min<std::int64_t>(impl_->audio_pos + have, audio_end);
+            if (to > from) {
+                std::memcpy(audio + static_cast<std::size_t>(from - static_cast<std::int64_t>(audio_start)) * ch,
+                            impl_->audio.data() + static_cast<std::size_t>(from - impl_->audio_pos) * ch,
+                            static_cast<std::size_t>(to - from) * ch * sizeof(float));
+            }
+            const std::int64_t drop = std::clamp<std::int64_t>(audio_end - impl_->audio_pos, 0, have);
+            impl_->audio.erase(impl_->audio.begin(), impl_->audio.begin() + static_cast<std::ptrdiff_t>(drop * static_cast<std::int64_t>(ch)));
+            impl_->audio_pos += drop;
         }
-        (void)audio_start;
     }
     return true;
 }

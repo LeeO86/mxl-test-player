@@ -806,7 +806,8 @@ App::App(Config cfg) : impl_(new Impl(std::move(cfg))) {
     impl_->domain_id = impl_->mxl.domain_id();
     for (int i = 0; i < impl_->cfg.outputs; ++i) {
         auto o = std::make_unique<Output>(i, impl_->cfg.output_configs[static_cast<std::size_t>(i)], impl_->cfg.format, impl_->mxl, impl_->library,
-                                          impl_->node, impl_->cfg.font_dir, impl_->cfg.ram_clip_max_s);
+                                          impl_->node, impl_->cfg.font_dir, impl_->cfg.ram_clip_max_s,
+                                          impl_->cfg.preroll_frames);
         o->on_change = [this] { impl_->save_state(); };
         impl_->outputs.push_back(std::move(o));
     }
