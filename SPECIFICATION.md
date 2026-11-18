@@ -532,6 +532,7 @@ Operator state is only under `CONFIG_DIR`. Nothing secret is logged or exported.
 
 Metrics (prefix `mxl_test_player_`): `output_state`, `grains_written_total`,
 `underruns_total`, `loops_total`, `source_info` (info gauge), `decode_ahead_frames`,
+`stream_missed_total` (1.3.3, grains of a streamed video whose frame was not decoded in time),
 `ram_clip_bytes`, `ram_budget_used_bytes` (1.3.0, the process-wide budget), `conversion_jobs` (by state), `conversion_duration_seconds`
 (histogram), `library_items`, `library_bytes`, `upload_bytes_total`.
 Grafana dashboard in `deploy/grafana/`.

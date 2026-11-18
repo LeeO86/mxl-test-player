@@ -490,13 +490,15 @@ void Output::reopen(const OutputConfig& cfg, const VideoFormat& fmt) {
 }
 
 // The writer's side of the decode-ahead: frame `frame` of `media`, or null while it is not decoded
-// yet. Frames before it are dropped; a frame the window does not hold restarts it there (a seek, a
-// new item). The pointer stays valid until the next call (the stream thread only appends).
+// yet (then `stream_shown_` holds the frame shown last). Frames before it are dropped; a frame the
+// window does not hold restarts it there (a seek, a new item). The pointer stays valid until the
+// next call (the stream thread only appends).
 const Output::StreamFrame* Output::stream_take(const std::shared_ptr<const Media>& media, std::int64_t frame) {
     std::lock_guard lock(stream_mu_);
     if (stream_media_ != media) {
         stream_media_ = media;
-        stream_.clear();
+        stream_last_ = -1;
+        stream_drop(stream_.size());
         stream_shown_ = StreamFrame{};
         ++stream_gen_;
     }
@@ -505,14 +507,32 @@ const Output::StreamFrame* Output::stream_take(const std::shared_ptr<const Media
     const auto it = std::find_if(stream_.begin(), stream_.end(), [&](const StreamFrame& f) { return f.frame == frame; });
     const StreamFrame* found = nullptr;
     if (it != stream_.end()) {
-        stream_.erase(stream_.begin(), it);
+        stream_drop(static_cast<std::size_t>(it - stream_.begin()));
         found = &stream_.front();
+        stream_last_ = frame;
     } else if (!stream_.empty()) {
-        stream_.clear();
+        stream_drop(stream_.size());
         ++stream_gen_;
     }
     stream_cv_.notify_one();
     return found;
+}
+
+// Drops the first `count` frames of the window (stream_mu_ held). The frame shown last moves to
+// `stream_shown_`; the other buffers go to the pool, so neither is copied nor allocated again.
+void Output::stream_drop(std::size_t count) {
+    auto recycle = [&](std::vector<std::uint8_t>&& buf) {
+        if (!buf.empty() && stream_pool_.size() < 4) stream_pool_.push_back(std::move(buf));
+    };
+    for (std::size_t i = 0; i < count; ++i) {
+        StreamFrame& f = stream_.front();
+        if (f.frame == stream_last_) {
+            std::swap(stream_shown_, f);
+            stream_last_ = -1;
+        }
+        recycle(std::move(f.v210));
+        stream_.pop_front();
+    }
 }
 
 // Decodes the streaming media's frames from the writer's frame on, up to PLAYER_PREROLL_FRAMES
@@ -540,6 +560,10 @@ void Output::stream_main() {
             if (stream_media_ && !stream_media_->mezz.empty() && stream_.size() < cap) {
                 media = stream_media_;
                 gen = stream_gen_;
+                if (next.v210.empty() && !stream_pool_.empty()) {
+                    next.v210 = std::move(stream_pool_.back());
+                    stream_pool_.pop_back();
+                }
                 // An empty window starts one frame after the writer's (it shows that one by
                 // the time the frame is decoded); a paused writer keeps asking for its frame.
                 k = stream_.empty() ? stream_want_ : stream_.back().frame + 1;
@@ -913,17 +937,12 @@ void Output::writer_main() {
             // Streams from the mezzanine: the decoded frame, else (decode behind) the last one shown.
             streamed = stream_take(media, std::clamp<std::int64_t>(media_frame, 0, media->frames - 1));
             if (streamed && streamed->v210.size() == full_bytes) {
-                if (stream_shown_.frame != streamed->frame || stream_shown_.v210.size() != full_bytes) {
-                    stream_shown_.frame = streamed->frame;
-                    stream_shown_.v210 = streamed->v210;
-                }
                 std::memcpy(fill, streamed->v210.data(), full_bytes);
-            } else if (stream_shown_.v210.size() == full_bytes) {
-                streamed = nullptr;
-                std::memcpy(fill, stream_shown_.v210.data(), full_bytes);
             } else {
                 streamed = nullptr;
-                fill_src = black_frame(fmt.width, fmt.height);
+                ++stream_missed_;
+                if (stream_shown_.v210.size() == full_bytes) std::memcpy(fill, stream_shown_.v210.data(), full_bytes);
+                else fill_src = black_frame(fmt.width, fmt.height);
             }
             item_name = media->name;
         } else {
@@ -1176,6 +1195,7 @@ nlohmann::json Output::status() const {
                           {"underruns", underruns_.load()},
                           {"loops", loops_.load()},
                           {"decode_ahead", ahead_.load()},
+                          {"stream_missed", stream_missed_.load()},
                           {"ram_bytes", ram_bytes_.load()},
                           {"progress", progress},
                           {"remaining_s", remain},

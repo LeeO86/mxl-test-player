@@ -244,6 +244,7 @@ json App::Impl::metrics() const {
     os << "# TYPE mxl_test_player_underruns_total counter\n";
     os << "# TYPE mxl_test_player_loops_total counter\n";
     os << "# TYPE mxl_test_player_decode_ahead_frames gauge\n";
+    os << "# TYPE mxl_test_player_stream_missed_total counter\n";
     os << "# TYPE mxl_test_player_ram_clip_bytes gauge\n";
     os << "# TYPE mxl_test_player_library_items gauge\n";
     os << "# TYPE mxl_test_player_library_bytes gauge\n";
@@ -260,6 +261,7 @@ json App::Impl::metrics() const {
         os << "mxl_test_player_underruns_total{output=\"" << idx << "\"} " << o->underruns() << "\n";
         os << "mxl_test_player_loops_total{output=\"" << idx << "\"} " << o->loops_done() << "\n";
         os << "mxl_test_player_decode_ahead_frames{output=\"" << idx << "\"} " << o->ahead() << "\n";
+        os << "mxl_test_player_stream_missed_total{output=\"" << idx << "\"} " << o->stream_missed() << "\n";
         os << "mxl_test_player_ram_clip_bytes{output=\"" << idx << "\"} " << o->ram_bytes() << "\n";
         os << "mxl_test_player_source_info{output=\"" << idx << "\",source=\"" << st["source"].value("type", "") << "\",item=\""
            << st.value("item", "") << "\"} 1\n";
@@ -323,6 +325,7 @@ void App::Impl::handle(const HttpRequest& req, HttpResponse& res) {
         os << "# HELP mxl_test_player_grains_written_total Grains committed\n# TYPE mxl_test_player_grains_written_total counter\n";
         os << "# TYPE mxl_test_player_underruns_total counter\n# TYPE mxl_test_player_loops_total counter\n";
         os << "# TYPE mxl_test_player_output_state gauge\n# TYPE mxl_test_player_decode_ahead_frames gauge\n";
+        os << "# TYPE mxl_test_player_stream_missed_total counter\n";
         os << "# TYPE mxl_test_player_ram_clip_bytes gauge\n# TYPE mxl_test_player_library_items gauge\n";
         os << "# TYPE mxl_test_player_library_bytes gauge\n# TYPE mxl_test_player_upload_bytes_total counter\n";
         os << "# TYPE mxl_test_player_conversion_jobs gauge\n# TYPE mxl_test_player_source_info gauge\n";
@@ -336,6 +339,7 @@ void App::Impl::handle(const HttpRequest& req, HttpResponse& res) {
             os << "mxl_test_player_underruns_total{output=\"" << o->index() << "\"} " << o->underruns() << "\n";
             os << "mxl_test_player_loops_total{output=\"" << o->index() << "\"} " << o->loops_done() << "\n";
             os << "mxl_test_player_decode_ahead_frames{output=\"" << o->index() << "\"} " << o->ahead() << "\n";
+            os << "mxl_test_player_stream_missed_total{output=\"" << o->index() << "\"} " << o->stream_missed() << "\n";
             os << "mxl_test_player_ram_clip_bytes{output=\"" << o->index() << "\"} " << o->ram_bytes() << "\n";
             os << "mxl_test_player_source_info{output=\"" << o->index() << "\",source=\"" << st["source"].value("type", "pattern") << "\"} 1\n";
         }
